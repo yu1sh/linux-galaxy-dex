@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# USB-only Samsung Galaxy S25 display/control launcher for Omarchy.
+set -u
+
+readonly WAIT_SECONDS="${S25_WAIT_SECONDS:-15}"
+readonly DEFAULT_BITRATE="${S25_BITRATE:-16M}"
+readonly DEFAULT_MAX_SIZE="${S25_MAX_SIZE:-1920}"
+readonly DEFAULT_MAX_FPS="${S25_MAX_FPS:-60}"
+readonly KEYBOARD_MODE="${S25_KEYBOARD:-uhid}"
+readonly MOUSE_MODE="${S25_MOUSE:-uhid}"
+
+notify() {
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send -a "Samsung S25" "$1" "${2:-}" >/dev/null 2>&1 || true
+  fi
+}
+
+fail() {
+  printf 'S25 USB: %s\n' "$1" >&2
+  notify "S25 USB" "$1"
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: omarchy-s25-usb [mirror|desktop|list]
+
+  mirror   Mirror the S25 main display and control it with the PC (default)
+  desktop  Create a landscape virtual display for a DeX-like desktop session
+  list     Show ADB devices (the launcher accepts USB devices only)
+EOF
+}
+
+command -v adb >/dev/null 2>&1 || fail "adb が見つかりません。android-tools を確認してください。"
+command -v scrcpy >/dev/null 2>&1 || fail "scrcpy が見つかりません。scrcpy を確認してください。"
+
+mode="${1:-mirror}"
+case "$mode" in
+  mirror|desktop|list) ;;
+  -h|--help|help) usage; exit 0 ;;
+  *) usage >&2; exit 2 ;;
+esac
+
+adb start-server >/dev/null 2>&1 || fail "ADBを起動できません。USB権限とadbusersグループを確認してください。"
+
+if [[ "$mode" == "list" ]]; then
+  adb devices -l
+  exit $?
+fi
+
+serial="${S25_ADB_SERIAL:-}"
+selected_usb=false
+last_unauthorized=""
+for ((waited = 0; waited <= WAIT_SECONDS; waited++)); do
+  devices_output="$(adb devices -l 2>/dev/null || true)"
+
+  if [[ -n "$serial" ]]; then
+    if printf '%s\n' "$devices_output" | awk -v want="$serial" '$1 == want && $2 == "unauthorized" && $0 ~ /(^|[[:space:]])usb:/ {found=1} END {exit !found}'; then
+      fail "電話の「USBデバッグを許可しますか？」でこのPCを許可してください。"
+    fi
+    if printf '%s\n' "$devices_output" | awk -v want="$serial" '$1 == want && $2 == "device" && $0 ~ /(^|[[:space:]])usb:/ {found=1} END {exit !found}'; then
+      selected_usb=true
+      break
+    fi
+  else
+    last_unauthorized="$(printf '%s\n' "$devices_output" | awk '$2 == "unauthorized" && $0 ~ /(^|[[:space:]])usb:/ {print $1}')"
+    mapfile -t usb_devices < <(printf '%s\n' "$devices_output" | awk '$2 == "device" && $0 ~ /(^|[[:space:]])usb:/ {print $1}')
+    if (( ${#usb_devices[@]} > 1 )); then
+      fail "USB端末が複数あります。S25_ADB_SERIAL=端末ID を指定してください。"
+    elif (( ${#usb_devices[@]} == 1 )); then
+      serial="${usb_devices[0]}"
+      selected_usb=true
+      break
+    fi
+  fi
+
+  if (( waited < WAIT_SECONDS )); then
+    sleep 1
+  fi
+done
+
+if ! $selected_usb; then
+  if [[ -n "$last_unauthorized" ]]; then
+    fail "電話の「USBデバッグを許可しますか？」でこのPCを許可してください。"
+  fi
+  if [[ -n "${S25_ADB_SERIAL:-}" ]]; then
+    fail "指定した端末IDがUSB接続の認証済み端末として見つかりません。S25_ADB_SERIALを確認してください。"
+  fi
+  fail "認証済みのUSB接続S25が見つかりません。USB-Cデータケーブルで接続し、USBデバッグを有効にしてください。"
+fi
+
+model="$(adb -s "$serial" shell getprop ro.product.model 2>/dev/null | tr -d '\r' | head -n 1 || true)"
+[[ -n "$model" ]] || model="Galaxy S25"
+
+common_args=(
+  "--serial=$serial"
+  "--video-codec=h264"
+  "--video-bit-rate=$DEFAULT_BITRATE"
+  "--max-fps=$DEFAULT_MAX_FPS"
+  "--video-buffer=0"
+  "--keyboard=$KEYBOARD_MODE"
+  "--mouse=$MOUSE_MODE"
+  "--keep-active"
+)
+
+if [[ "$mode" == "mirror" ]]; then
+  notify "S25 USB" "$model のリアルタイム表示を起動しています。"
+  exec scrcpy "${common_args[@]}" "--max-size=$DEFAULT_MAX_SIZE" '--window-title=Samsung S25 (USB)'
+fi
+
+# Samsung's system decorations provide the home/task UI on the S25 virtual
+# display. An app package can be supplied when a device needs one explicitly.
+desktop_size="${S25_DESKTOP_SIZE:-1920x1080/320}"
+desktop_app="${S25_DESKTOP_APP-none}"
+desktop_args=(
+  "${common_args[@]}"
+  "--new-display=$desktop_size"
+  "--flex-display"
+  "--no-vd-destroy-content"
+  "--display-ime-policy=local"
+  '--window-title=Samsung S25 Desktop (USB)'
+)
+
+if [[ -n "$desktop_app" && "$desktop_app" != "none" ]] && adb -s "$serial" shell pm path "$desktop_app" >/dev/null 2>&1; then
+  desktop_args+=("--start-app=$desktop_app")
+fi
+
+notify "S25 USB" "$model のDeX風仮想デスクトップを起動しています。"
+exec scrcpy "${desktop_args[@]}"

@@ -1,0 +1,22 @@
+# Local/editor files and runtime output
+*.log
+*.pid
+*.sock
+*.tmp
+.DS_Store
+.env
+.env.*
+
+# Keep local backups, archives, and generated artifacts out of commits.
+*.bak
+*.backup
+*.orig
+*.swp
+*.swo
+*.tar
+*.tar.gz
+*.zip
+build/
+dist/
+coverage/
+out/
