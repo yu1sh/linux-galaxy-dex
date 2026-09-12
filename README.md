@@ -38,12 +38,12 @@ Android端末のメインディスプレイをLinux上に低遅延で表示し�
 
 Samsung Galaxyでは端末側のSystem UIによってデスクトップ風のUIを利用できる場合がありますが、**Samsung公式DeXを起動しているわけではありません**。
 
-端末によって仮想ディスプレイにLauncherが表示されない場合は、`S25_DESKTOP_APP` で起動するアプリを指定できます。
+端末によって仮想ディスプレイにLauncherが表示されない場合は、`GALAXY_DESKTOP_APP` で起動するアプリを指定できます。
 
 例:
 
 ```sh
-S25_DESKTOP_APP=com.android.settings omarchy-s25-usb desktop
+GALAXY_DESKTOP_APP=com.android.settings galaxy-usb desktop
 ```
 
 ## Requirements
@@ -117,16 +117,14 @@ cd linux-galaxy-usb
 
 ### 3. Install launcher
 
-現在、実行ファイル名と環境変数名は既存利用者との互換性のため `omarchy-s25-usb` / `S25_*` の名称を維持しています。
-
 ```sh
-install -Dm755 omarchy-s25-usb "$HOME/.local/bin/omarchy-s25-usb"
+install -Dm755 galaxy-usb "$HOME/.local/bin/galaxy-usb"
 
-install -Dm644 Samsung-S25-USB-Mirror.desktop \
-  "$HOME/.local/share/applications/Samsung-S25-USB-Mirror.desktop"
+install -Dm644 Galaxy-USB-Mirror.desktop \
+  "$HOME/.local/share/applications/Galaxy-USB-Mirror.desktop"
 
-install -Dm644 Samsung-S25-USB-Desktop.desktop \
-  "$HOME/.local/share/applications/Samsung-S25-USB-Desktop.desktop"
+install -Dm644 Galaxy-USB-Desktop.desktop \
+  "$HOME/.local/share/applications/Galaxy-USB-Desktop.desktop"
 
 install -Dm644 README.md \
   "$HOME/.local/share/doc/linux-galaxy-usb/README.md"
@@ -136,7 +134,7 @@ update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 
 `$HOME/.local/bin` がPATHに含まれていることを確認してください。
 
-Desktop Entryを使用しない場合は、`omarchy-s25-usb` スクリプトだけインストールしてCLIから利用できます。
+Desktop Entryを使用しない場合は、`galaxy-usb` スクリプトだけインストールしてCLIから利用できます。
 
 ## Android setup
 
@@ -154,7 +152,7 @@ Samsung Galaxyの場合:
 接続確認:
 
 ```sh
-omarchy-s25-usb list
+galaxy-usb list
 ```
 
 例:
@@ -173,31 +171,31 @@ RXXXXXXXXXX    device usb:1-2 product:... model:...
 ### Mirror
 
 ```sh
-omarchy-s25-usb mirror
+galaxy-usb mirror
 ```
 
 引数を省略した場合もMirrorモードになります。
 
 ```sh
-omarchy-s25-usb
+galaxy-usb
 ```
 
 ### Desktop
 
 ```sh
-omarchy-s25-usb desktop
+galaxy-usb desktop
 ```
 
 ### List devices
 
 ```sh
-omarchy-s25-usb list
+galaxy-usb list
 ```
 
 ### Help
 
 ```sh
-omarchy-s25-usb --help
+galaxy-usb --help
 ```
 
 ## Multiple USB devices
@@ -207,7 +205,7 @@ USB接続された認証済みADB端末が複数存在する場合、ランチ�
 使用するADB serialを明示してください。
 
 ```sh
-S25_ADB_SERIAL=XXXXXXXX omarchy-s25-usb mirror
+GALAXY_ADB_SERIAL=XXXXXXXX galaxy-usb mirror
 ```
 
 ADB serialは次で確認できます。
@@ -222,22 +220,22 @@ adb devices -l
 
 | Variable | Default | Description |
 |---|---:|---|
-| `S25_WAIT_SECONDS` | `15` | USB ADB端末を待機する秒数 |
-| `S25_BITRATE` | `16M` | scrcpy video bitrate |
-| `S25_MAX_SIZE` | `1920` | Mirrorの最大解像度 |
-| `S25_MAX_FPS` | `60` | 最大フレームレート |
-| `S25_KEYBOARD` | `uhid` | Keyboard input mode |
-| `S25_MOUSE` | `uhid` | Mouse input mode |
-| `S25_ADB_SERIAL` | auto | 使用するADB device serial |
-| `S25_DESKTOP_SIZE` | `1920x1080/320` | 仮想ディスプレイのサイズ / DPI |
-| `S25_DESKTOP_APP` | `none` | Desktop起動時に開くAndroid package |
+| `GALAXY_WAIT_SECONDS` | `15` | USB ADB端末を待機する秒数 |
+| `GALAXY_BITRATE` | `16M` | scrcpy video bitrate |
+| `GALAXY_MAX_SIZE` | `1920` | Mirrorの最大解像度 |
+| `GALAXY_MAX_FPS` | `60` | 最大フレームレート |
+| `GALAXY_KEYBOARD` | `uhid` | Keyboard input mode |
+| `GALAXY_MOUSE` | `uhid` | Mouse input mode |
+| `GALAXY_ADB_SERIAL` | auto | 使用するADB device serial |
+| `GALAXY_DESKTOP_SIZE` | `1920x1080/320` | 仮想ディスプレイのサイズ / DPI |
+| `GALAXY_DESKTOP_APP` | `none` | Desktop起動時に開くAndroid package |
 
 ### SDK input
 
 UHID入力が端末で正常に動作しない場合:
 
 ```sh
-S25_KEYBOARD=sdk S25_MOUSE=sdk omarchy-s25-usb mirror
+GALAXY_KEYBOARD=sdk GALAXY_MOUSE=sdk galaxy-usb mirror
 ```
 
 ## Controls
@@ -263,7 +261,7 @@ scrcpyのバージョンや設定によってショートカットは異なる�
 | Other recent Galaxy devices | Expected to work; not fully tested |
 | Other Android devices | Mirror likely; Desktop UI is device-dependent |
 
-このツールにはOmarchy固有APIやSamsung S25のモデル番号判定はありません。
+このツールにはOmarchy固有APIやSamsung S25のモデル番号判定はありません。実行ファイル名・環境変数名・Desktop EntryもGalaxy向けの汎用名称に統一しています。
 
 端末モデル名はADBから取得していますが、S25であるかどうかを判定して処理を拒否するコードはありません。
 
@@ -294,7 +292,7 @@ Android device
      ADB
       │
       ▼
-omarchy-s25-usb
+galaxy-usb
       │
       ├─ adb server start
       ├─ USB接続端末のみ検出
