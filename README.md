@@ -1,75 +1,328 @@
-# Galaxy S25 USB表示 for Omarchy
+# Linux Galaxy USB
 
-PCとGalaxy S25をUSB-Cのデータ通信対応ケーブルで接続し、S25の画面をOmarchy上に低遅延で表示・操作するための導線です。インストールされる起動ファイルは次の2つです。
+Linux PCとSamsung Galaxy / Android端末をUSBで接続し、[scrcpy](https://github.com/Genymobile/scrcpy)を利用して画面表示・操作を行うためのUSB専用ランチャーです。
 
-- **Samsung S25 (USB) - Mirror**: S25のメイン画面をそのまま表示。PCのマウスとキーボードで操作できます。
-- **Samsung S25 (USB) - Desktop**: `scrcpy --new-display` で1920×1080の横長仮想ディスプレイを作成します。S25のシステムUIを使ってSamsung DeXに似た操作感にできますが、Samsung公式DeXではありません。
+Galaxy S25 + Omarchyで作成・検証していますが、仕組み自体はOmarchyやGalaxy S25に限定されません。必要な `adb` / `scrcpy` / USB権限が利用できるLinux環境で動作するように構成されています。
 
-## 必要なもの
+> [!NOTE]
+> Galaxy S25で実機検証しています。ほかのGalaxy端末やAndroid端末でもMirrorは動作する可能性が高い一方、DesktopモードのUIや挙動は端末メーカー・Androidバージョンによって異なります。
 
-- OmarchyなどのLinuxデスクトップ環境
-- `bash`
-- `adb`（Arch系では `android-tools`）
-- 仮想ディスプレイに対応した最近の `scrcpy`
-- USB権限用の `android-udev` またはディストリビューションに対応するADB用udevルール
-- 通知を表示する場合のみ `libnotify`（`notify-send`）
+## Features
 
-Arch/Omarchyでは、例えば次のパッケージをインストールします。
+### Mirror
+
+Android端末のメインディスプレイをLinux上に低遅延で表示し、PCのマウスとキーボードから操作します。
+
+標準設定:
+
+- USB ADB接続のみ使用
+- H.264
+- 16 Mbps
+- 最大60 fps
+- 最大1920 px
+- video buffer 0
+- UHID keyboard / mouse
+- `scrcpy --keep-active`
+
+### Desktop
+
+`scrcpy --new-display` を利用して、Android端末内に独立した横長の仮想ディスプレイを作成します。
+
+標準では:
+
+```text
+1920x1080 / 320 dpi
+```
+
+の仮想ディスプレイを作成し、`--flex-display` によりPC側のウィンドウサイズに追従させます。
+
+Samsung Galaxyでは端末側のSystem UIによってデスクトップ風のUIを利用できる場合がありますが、**Samsung公式DeXを起動しているわけではありません**。
+
+端末によって仮想ディスプレイにLauncherが表示されない場合は、`S25_DESKTOP_APP` で起動するアプリを指定できます。
+
+例:
+
+```sh
+S25_DESKTOP_APP=com.android.settings omarchy-s25-usb desktop
+```
+
+## Requirements
+
+### Linux host
+
+以下が必要です。
+
+- Linux
+- Bash
+- ADB
+- scrcpy **4.0以上**
+- ADB用udevルールなど、一般ユーザーからUSB接続Android端末へアクセスできる設定
+- `notify-send`（デスクトップ通知を使う場合のみ）
+
+本ランチャーでは `--flex-display` と `--keep-active` を使用するため、scrcpy 4.0以上を前提としています。
+
+### Android device
+
+#### Mirror mode
+
+scrcpyが対応するAndroid端末で利用できます。
+
+Galaxy S25以外について端末モデルによる制限をコード上で設けていません。
+
+#### Desktop mode
+
+`--new-display` を利用するためAndroid 10以降が必要です。
+
+ただし、仮想ディスプレイ上にLauncherやSystem UIがどのように表示されるかは端末によって異なります。そのため、Galaxy S25と同じDesktop UIになることは保証されません。
+
+## Tested environment
+
+現在、以下で実機動作を確認しています。
+
+- Host: Omarchy / Linux
+- Device: Samsung Galaxy S25
+- Connection: USB-C data cable
+- Mirror: 動作確認済み
+- Desktop virtual display: 動作確認済み
+- Mouse / keyboard control: 動作確認済み
+
+ほかのLinuxディストリビューションやAndroid端末での報告も歓迎します。
+
+## Installation
+
+### 1. Dependencies
+
+#### Arch Linux / Omarchy
 
 ```sh
 sudo pacman -S --needed android-tools android-udev scrcpy libnotify
 ```
 
-このリポジトリは第三者バイナリを同梱せず、インストール済みの `adb` と `scrcpy` を使用します。USB権限の変更後は、ディストリビューションの案内に従って再ログインやudevの再読み込みを行ってください。
+ほかのLinuxディストリビューションでは、各ディストリビューションのパッケージマネージャーを使用して次を導入してください。
 
-## インストール
+- ADB / Android platform tools
+- scrcpy 4.0+
+- Android用udevルール
+- `notify-send`（任意）
 
-GitHubから取得したリポジトリのディレクトリで次を実行します。
+> [!IMPORTANT]
+> ディストリビューション標準リポジトリのscrcpyが4.0未満の場合、本ランチャーのDesktopモードなどで未対応オプションのエラーが発生します。
+
+### 2. Clone
 
 ```sh
-git clone https://github.com/yu1sh/omarchy-s25-usb.git
-cd omarchy-s25-usb
+git clone https://github.com/yu1sh/linux-galaxy-usb.git
+cd linux-galaxy-usb
+```
+
+### 3. Install launcher
+
+現在、実行ファイル名と環境変数名は既存利用者との互換性のため `omarchy-s25-usb` / `S25_*` の名称を維持しています。
+
+```sh
 install -Dm755 omarchy-s25-usb "$HOME/.local/bin/omarchy-s25-usb"
-install -Dm644 Samsung-S25-USB-Mirror.desktop "$HOME/.local/share/applications/Samsung-S25-USB-Mirror.desktop"
-install -Dm644 Samsung-S25-USB-Desktop.desktop "$HOME/.local/share/applications/Samsung-S25-USB-Desktop.desktop"
-install -Dm644 README.md "$HOME/.local/share/doc/omarchy-s25-usb/README.md"
+
+install -Dm644 Samsung-S25-USB-Mirror.desktop \
+  "$HOME/.local/share/applications/Samsung-S25-USB-Mirror.desktop"
+
+install -Dm644 Samsung-S25-USB-Desktop.desktop \
+  "$HOME/.local/share/applications/Samsung-S25-USB-Desktop.desktop"
+
+install -Dm644 README.md \
+  "$HOME/.local/share/doc/linux-galaxy-usb/README.md"
+
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 ```
 
-`$HOME/.local/bin`をPATHに含めてください。アプリメニューに表示されない場合は、ログインし直すかデスクトップ環境のアプリケーションキャッシュを更新してください。
+`$HOME/.local/bin` がPATHに含まれていることを確認してください。
 
-## 初回接続
+Desktop Entryを使用しない場合は、`omarchy-s25-usb` スクリプトだけインストールしてCLIから利用できます。
 
-1. S25で「設定 → 端末情報 → ソフトウェア情報 → ビルド番号」を7回タップして開発者向けオプションを有効にします。
-2. 「設定 → 開発者向けオプション → USBデバッグ」をオンにします。
-3. S25をロック解除した状態で、データ通信対応のUSB-CケーブルをOmarchy PCへ接続します。
-4. S25に表示される「USBデバッグを許可しますか？」でこのPCを許可します。
-5. Omarchyのアプリメニューから上記のMirrorまたはDesktopを起動します。
+## Android setup
 
-端末から確認する場合は `omarchy-s25-usb list` を実行します。S25の行が `device` になり、`usb:` が含まれていればUSB接続は準備完了です。ネットワークADBはこの起動ファイルでは受け付けません。
+初回のみAndroid側でUSB debuggingを有効にします。
 
-## 操作
+Samsung Galaxyの場合:
 
-標準設定は低遅延のH.264、最大60 fps、16 Mbps、キーボード・マウスはUHIDです。UHID入力を初めて使うときは、S25の「物理キーボード」設定を一度開いてください。入力方式に問題がある場合は、端末から次のようにSDK方式で起動できます。
+1. **設定 → 端末情報 → ソフトウェア情報**
+2. **ビルド番号**を7回タップ
+3. **開発者向けオプション**を開く
+4. **USBデバッグ**を有効化
+5. データ通信対応USBケーブルでLinux PCへ接続
+6. Android側の **「USBデバッグを許可しますか？」** を許可
 
-UHIDマウスをPCへ戻すには左Altキーを単押しします。全画面はAlt+FまたはF11、終了はAlt+Qです。
+接続確認:
+
+```sh
+omarchy-s25-usb list
+```
+
+例:
+
+```text
+List of devices attached
+RXXXXXXXXXX    device usb:1-2 product:... model:...
+```
+
+本ランチャーは `adb devices -l` の結果から **`device` かつ `usb:` を持つ端末だけ**を選択します。
+
+そのため、ネットワークADB端末は自動選択しません。
+
+## Usage
+
+### Mirror
+
+```sh
+omarchy-s25-usb mirror
+```
+
+引数を省略した場合もMirrorモードになります。
+
+```sh
+omarchy-s25-usb
+```
+
+### Desktop
+
+```sh
+omarchy-s25-usb desktop
+```
+
+### List devices
+
+```sh
+omarchy-s25-usb list
+```
+
+### Help
+
+```sh
+omarchy-s25-usb --help
+```
+
+## Multiple USB devices
+
+USB接続された認証済みADB端末が複数存在する場合、ランチャーは誤った端末を選択しないよう停止します。
+
+使用するADB serialを明示してください。
+
+```sh
+S25_ADB_SERIAL=XXXXXXXX omarchy-s25-usb mirror
+```
+
+ADB serialは次で確認できます。
+
+```sh
+adb devices -l
+```
+
+## Configuration
+
+現在の環境変数は以下です。
+
+| Variable | Default | Description |
+|---|---:|---|
+| `S25_WAIT_SECONDS` | `15` | USB ADB端末を待機する秒数 |
+| `S25_BITRATE` | `16M` | scrcpy video bitrate |
+| `S25_MAX_SIZE` | `1920` | Mirrorの最大解像度 |
+| `S25_MAX_FPS` | `60` | 最大フレームレート |
+| `S25_KEYBOARD` | `uhid` | Keyboard input mode |
+| `S25_MOUSE` | `uhid` | Mouse input mode |
+| `S25_ADB_SERIAL` | auto | 使用するADB device serial |
+| `S25_DESKTOP_SIZE` | `1920x1080/320` | 仮想ディスプレイのサイズ / DPI |
+| `S25_DESKTOP_APP` | `none` | Desktop起動時に開くAndroid package |
+
+### SDK input
+
+UHID入力が端末で正常に動作しない場合:
 
 ```sh
 S25_KEYBOARD=sdk S25_MOUSE=sdk omarchy-s25-usb mirror
 ```
 
-Desktopで特定のアプリを仮想画面へ起動したい場合は、例えば `S25_DESKTOP_APP=com.android.settings omarchy-s25-usb desktop` のように指定できます。通常はS25のシステムUIを使うため、アプリ指定は不要です。
+## Controls
 
-## 位置づけ
+scrcpy標準ショートカットを利用します。
 
-Desktop起動はUSB ADB上のscrcpy仮想ディスプレイを使うため、S25のシステムUIをPCウィンドウへリアルタイム転送し、PC入力を返すDeX風構成です。Samsung公式DeXではなく、OSやアプリによって表示・入力・互換性が異なります。
+代表例:
 
-## DRM保護コンテンツの制限
+- **Left Alt**: UHID mouse captureを解除
+- **Alt + F / F11**: Fullscreen
+- **Alt + Q**: Quit
 
-HDCPなどで保護された映像はAndroid側が画面キャプチャを禁止するため、scrcpyでは黒画面や表示拒否になることがあります。U-NEXTなどのDRM保護映像をこのランチャーで表示・録画できるようにはなりません。
+scrcpyのバージョンや設定によってショートカットは異なる場合があります。
 
-## 検証状況
+## Compatibility
 
-起動ファイルのBash構文、Desktop Entry、未接続時の案内を検証済みです。Galaxy S25実機でMirrorの映像転送と、Desktopの1920×1080仮想表示・マウス・キーボード操作を確認しています。端末のAndroidバージョンやscrcpyの版によって利用できる機能は変わります。音声転送は未確認です。
+| Environment | Expected compatibility |
+|---|---|
+| Omarchy | Tested |
+| Arch Linux | High |
+| Other standard Linux desktop distributions | Expected to work if dependencies are satisfied |
+| Galaxy S25 | Tested |
+| Other recent Galaxy devices | Expected to work; not fully tested |
+| Other Android devices | Mirror likely; Desktop UI is device-dependent |
 
-参考: [scrcpy公式の仮想ディスプレイ仕様](https://github.com/Genymobile/scrcpy/blob/master/doc/virtual-display.md)
+このツールにはOmarchy固有APIやSamsung S25のモデル番号判定はありません。
+
+端末モデル名はADBから取得していますが、S25であるかどうかを判定して処理を拒否するコードはありません。
+
+## DRM-protected content
+
+HDCP / DRMなどで保護された動画は、Android側によって画面キャプチャが禁止される場合があります。
+
+その場合、scrcpyでは次のような挙動になることがあります。
+
+- 黒画面
+- 映像部分だけ非表示
+- キャプチャ拒否
+
+このランチャーはAndroidのDRM制限を回避するものではありません。
+
+## How it works
+
+処理の概要:
+
+```text
+Android device
+      │
+      │ USB
+      ▼
+ Linux USB subsystem
+      │
+      ▼
+     ADB
+      │
+      ▼
+omarchy-s25-usb
+      │
+      ├─ adb server start
+      ├─ USB接続端末のみ検出
+      ├─ authorization確認
+      ├─ device serial選択
+      │
+      └─ scrcpy起動
+             │
+             ├─ Mirror
+             │    └─ Android main display
+             │
+             └─ Desktop
+                  └─ Android virtual display
+```
+
+本ランチャー自体がAndroid映像の転送や入力処理を実装しているわけではありません。
+
+実際の映像転送・仮想ディスプレイ作成・入力制御はscrcpyが担当し、このリポジトリはUSB端末の選択とscrcpyオプションをまとめる薄いBashラッパーとして動作します。
+
+## Notes
+
+- root不要
+- Android側への常駐アプリのインストール不要
+- ネットワークADBは自動選択対象外
+- Samsung DeXそのものではありません
+- USBケーブルはデータ通信対応のものを使用してください
+
+## References
+
+- [scrcpy](https://github.com/Genymobile/scrcpy)
+- [scrcpy virtual display documentation](https://github.com/Genymobile/scrcpy/blob/master/doc/virtual-display.md)
