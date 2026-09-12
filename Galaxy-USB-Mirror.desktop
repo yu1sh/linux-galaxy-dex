@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Galaxy USB - Mirror
+Comment=Mirror and control a Galaxy or Android device over USB
+TryExec=galaxy-usb
+Exec=galaxy-usb mirror
+Terminal=false
+StartupNotify=false
+Categories=Utility;
+Keywords=Samsung;Galaxy;Android;USB;scrcpy;
