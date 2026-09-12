@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Galaxy USB - Desktop
+Comment=Open a landscape virtual display for a Galaxy or Android device over USB
+TryExec=galaxy-usb
+Exec=galaxy-usb desktop
+Terminal=false
+StartupNotify=false
+Categories=Utility;
+Keywords=Samsung;Galaxy;Android;USB;Desktop;DeX;scrcpy;
