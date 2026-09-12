@@ -1,4 +1,4 @@
-# Linux Galaxy USB
+# Linux Galaxy DEX
 
 Linux PCとSamsung Galaxy / Android端末をUSBで接続し、[scrcpy](https://github.com/Genymobile/scrcpy)を利用して画面表示・操作を行うためのUSB専用ランチャーです。
 
