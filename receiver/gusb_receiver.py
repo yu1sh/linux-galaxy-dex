@@ -18,7 +18,10 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
+import queue
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator, Sequence
@@ -27,6 +30,9 @@ try:  # Direct execution from receiver/gusb_receiver.py.
     from protocol import (
         AOA_IDENTIFIER_STRINGS,
         HELLO_PAYLOAD,
+        FLAG_CODEC_CONFIG,
+        FLAG_END_OF_ACCESS_UNIT,
+        FLAG_KEY_FRAME,
         TYPE_ERROR,
         TYPE_HELLO,
         TYPE_INFO,
@@ -41,6 +47,9 @@ except ImportError:  # ``python -m receiver.gusb_receiver``.
     from .protocol import (
         AOA_IDENTIFIER_STRINGS,
         HELLO_PAYLOAD,
+        FLAG_CODEC_CONFIG,
+        FLAG_END_OF_ACCESS_UNIT,
+        FLAG_KEY_FRAME,
         TYPE_ERROR,
         TYPE_HELLO,
         TYPE_INFO,
@@ -90,6 +99,60 @@ HELLO_TIMEOUT_SECONDS = 120.0
 BULK_TIMEOUT_MS = 500
 READ_SIZE = 16_384
 POLL_INTERVAL_SECONDS = 0.10
+DEFAULT_QUEUE_MAX_ITEMS = 3
+DEFAULT_QUEUE_MAX_BYTES = 1_500_000
+DEFAULT_QUEUE_MAX_AGE_SECONDS = 0.25
+MAX_ACCESS_UNIT_BYTES = 8 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class AccessUnit:
+    payload: bytes
+    flags: int
+    created: float
+
+
+class LatestFrameQueue:
+    """Bounded queue which retains the newest complete access units."""
+    def __init__(self, max_items=DEFAULT_QUEUE_MAX_ITEMS, max_bytes=DEFAULT_QUEUE_MAX_BYTES,
+                 max_age_seconds=DEFAULT_QUEUE_MAX_AGE_SECONDS):
+        self.max_items, self.max_bytes, self.max_age_seconds = max_items, max_bytes, max_age_seconds
+        self._items = deque()
+        self._bytes = 0
+        self._lock = threading.Lock()
+        self.awaiting_keyframe = True
+
+    def put(self, unit: AccessUnit) -> None:
+        with self._lock:
+            self._items.append(unit); self._bytes += len(unit.payload)
+            now = time.monotonic()
+            dropped = False
+            while self._items and (len(self._items) > self.max_items or self._bytes > self.max_bytes or now - self._items[0].created > self.max_age_seconds):
+                self._bytes -= len(self._items.popleft().payload)
+                dropped = True
+            if dropped: self.awaiting_keyframe = True
+
+    def get_latest(self) -> AccessUnit | None:
+        with self._lock:
+            if not self._items: return None
+            unit = self._items[-1]
+            self._items.clear(); self._bytes = 0
+            return unit
+
+    def get_for_output(self) -> AccessUnit | None:
+        with self._lock:
+            if not self._items: return None
+            if self.awaiting_keyframe:
+                key = next((i for i, u in enumerate(self._items) if u.flags & FLAG_KEY_FRAME), None)
+                if key is None: return None
+                unit = self._items[key]
+                self._items = deque(list(self._items)[key + 1:])
+                self._bytes = sum(len(u.payload) for u in self._items)
+                self.awaiting_keyframe = False
+                return unit
+            unit = self._items[-1]
+            self._items.clear(); self._bytes = 0
+            return unit
 
 
 class USBContext(ctypes.Structure):
@@ -1064,6 +1127,13 @@ class StreamSession:
         self.sink: FfplaySink | None = None
         self._stop_sent = False
         self._remote_stop = False
+        self._video_queue = LatestFrameQueue()
+        self._au_parts = bytearray()
+        self._au_flags = 0
+        self._config = b""
+        self._in_run = False
+        self._reader_stop = threading.Event()
+        self._reader_thread: threading.Thread | None = None
 
     def send(self, frame_type: int, payload: bytes = b"") -> None:
         retry_timeout_seconds = (
@@ -1095,18 +1165,84 @@ class StreamSession:
 
     def run(self) -> None:
         self.send(TYPE_HELLO, HELLO_PAYLOAD)
-        while True:
-            chunk = self.usb.bulk_in(self.connection)
-            if not chunk:
-                continue
+        events: queue.Queue[object] = queue.Queue(maxsize=16)
+        def reader() -> None:
+            parts = bytearray(); flags = 0; config = b""
             try:
-                frames = self.parser.feed(chunk)
-                for frame in frames:
-                    if self.handle(frame):
-                        return
-            except FrameError as error:
-                self.send_error_best_effort(str(error))
-                raise
+                while not self._reader_stop.is_set():
+                    chunk = self.usb.bulk_in(self.connection)
+                    if chunk:
+                        for frame in self.parser.feed(chunk):
+                            if frame.type == TYPE_VIDEO:
+                                parts.extend(frame.payload); flags |= frame.flags
+                                if flags & FLAG_CODEC_CONFIG and frame.flags & FLAG_END_OF_ACCESS_UNIT:
+                                    config += bytes(parts)
+                                if len(parts) > MAX_ACCESS_UNIT_BYTES:
+                                    raise FrameError("VIDEO access unitが大きすぎます")
+                                if frame.flags & FLAG_END_OF_ACCESS_UNIT:
+                                    payload = bytes(parts); au_flags = flags
+                                    parts.clear(); flags = 0
+                                    if au_flags & FLAG_KEY_FRAME and config and not (au_flags & FLAG_CODEC_CONFIG):
+                                        payload = config + payload
+                                    self._video_queue.put(AccessUnit(payload, au_flags, time.monotonic()))
+                            elif frame.type == TYPE_INFO:
+                                # Rotation announces a new encoder sequence;
+                                # discard partial data and stale SPS/PPS here,
+                                # before any following IDR can be recovered.
+                                parts.clear(); flags = 0; config = b""
+                                events.put(frame)
+                            else:
+                                # Control traffic is finite and never competes with video.
+                                if frame.type == TYPE_STOP and parts:
+                                    self._video_queue.put(AccessUnit(bytes(parts), flags, time.monotonic()))
+                                    parts.clear(); flags = 0
+                                events.put(frame)
+            except BaseException as error:
+                try: events.put(error, timeout=0.2)
+                except queue.Full: pass
+        thread = threading.Thread(target=reader, name="gusb-bulk-reader", daemon=True)
+        thread.start()
+        self._reader_thread = thread
+        self._in_run = True
+        try:
+            while True:
+                try:
+                    event = events.get(timeout=0.05)
+                except queue.Empty:
+                    event = None
+                if event is not None and isinstance(event, BaseException):
+                    raise event
+                stopped = self.handle(event) if event is not None else False
+                # Drain only the newest complete AU; USB reading remains independent.
+                unit = self._video_queue.get_for_output()
+                if unit is None and stopped:
+                    # Compatibility for pre-AU-flag senders only; never emit
+                    # a predictive frame while awaiting a recovery keyframe.
+                    legacy = self._video_queue.get_latest()
+                    if legacy is not None and legacy.flags == 0:
+                        unit = legacy
+                if unit is not None:
+                    self._write_video(unit.payload)
+                if stopped: return
+        except FrameError as error:
+            self.send_error_best_effort(str(error))
+            raise
+        finally:
+            self._reader_stop.set()
+            if thread.is_alive(): thread.join(timeout=1.0)
+
+    def _write_video(self, payload: bytes) -> None:
+        try:
+            if self.raw_stdout:
+                sys.stdout.buffer.write(payload); sys.stdout.buffer.flush()
+            elif self.sink is not None:
+                self.sink.write(payload)
+        except (BrokenPipeError, OSError) as error:
+            self.send_stop_best_effort()
+            raise StreamStopped("H264 stdoutが切断されました") from error
+        except StreamStopped:
+            self.send_stop_best_effort()
+            raise
 
     def handle(self, frame: Frame) -> bool:
         if frame.type == TYPE_INFO:
@@ -1115,6 +1251,9 @@ class StreamSession:
             # new size.  H.264 carries SPS/PPS in the following VIDEO bytes;
             # ffplay can continue decoding the same pipe across that change.
             self.info = stream_info
+            self._au_parts.clear()
+            self._au_flags = 0
+            self._config = b""
             if not self.raw_stdout and self.sink is None:
                 if not self.ffplay_path:
                     raise ReceiverError("ffplayが見つかりません。--stdoutを使用してください")
@@ -1128,21 +1267,34 @@ class StreamSession:
         if frame.type == TYPE_VIDEO:
             if self.info is None:
                 raise FrameError("INFOより前にVIDEOを受信しました")
-            if self.raw_stdout:
-                try:
-                    sys.stdout.buffer.write(frame.payload)
-                    sys.stdout.buffer.flush()
-                except (BrokenPipeError, OSError) as error:
-                    self.send_stop_best_effort()
-                    raise StreamStopped("H264 stdoutが切断されました") from error
-            elif self.sink is not None:
-                try:
-                    self.sink.write(frame.payload)
-                except StreamStopped:
-                    self.send_stop_best_effort()
-                    raise
+            self._au_parts.extend(frame.payload)
+            self._au_flags |= frame.flags
+            if self._au_flags & FLAG_CODEC_CONFIG:
+                # csd-0 and csd-1 are sent as separate config AUs; retain
+                # both in wire order for recovery after a queue drop.
+                if frame.flags & FLAG_END_OF_ACCESS_UNIT:
+                    self._config += bytes(self._au_parts)
+            if len(self._au_parts) > MAX_ACCESS_UNIT_BYTES:
+                self._au_parts.clear(); self._au_flags = 0
+                raise FrameError("VIDEO access unitが大きすぎます")
+            # Android marks the final bulk frame of every complete AU.
+            if frame.flags & FLAG_END_OF_ACCESS_UNIT:
+                payload = bytes(self._au_parts)
+                flags = self._au_flags
+                self._au_parts.clear(); self._au_flags = 0
+                if flags & FLAG_KEY_FRAME and self._config and not (flags & FLAG_CODEC_CONFIG):
+                    payload = self._config + payload
+                self._video_queue.put(AccessUnit(payload, flags, time.monotonic()))
+            elif not self._in_run:
+                # Preserve the direct handle() API used by integrations/tests;
+                # the live reader path always waits for END_OF_ACCESS_UNIT.
+                self._write_video(frame.payload)
             return False
         if frame.type == TYPE_STOP:
+            if self._au_parts:
+                payload = bytes(self._au_parts)
+                self._au_parts.clear(); self._au_flags = 0
+                self._write_video(payload)
             self._remote_stop = True
             return True
         if frame.type == TYPE_ERROR:
@@ -1156,6 +1308,10 @@ class StreamSession:
     def close(self, send_stop: bool = True) -> None:
         if send_stop:
             self.send_stop_best_effort()
+        self._reader_stop.set()
+        if self._reader_thread is not None and self._reader_thread.is_alive():
+            self._reader_thread.join(timeout=1.0)
+        self._reader_thread = None
         if self.sink is not None:
             self.sink.close()
             self.sink = None

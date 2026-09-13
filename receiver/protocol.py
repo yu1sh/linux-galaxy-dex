@@ -26,6 +26,13 @@ FRAME_TYPES = frozenset(
     (TYPE_HELLO, TYPE_VIDEO, TYPE_INFO, TYPE_STOP, TYPE_ERROR)
 )
 
+# VIDEO flags are carried on every chunk.  The end marker lets the receiver
+# assemble a complete Annex-B access unit before handing it to the decoder;
+# key/config markers let it recover cleanly after a bounded-queue drop.
+FLAG_KEY_FRAME = 0x0001
+FLAG_CODEC_CONFIG = 0x0002
+FLAG_END_OF_ACCESS_UNIT = 0x0004
+
 # Android Open Accessory identifiers.  Keep these values in one place: the
 # Android app filters on manufacturer/model before accepting an accessory.
 AOA_MANUFACTURER = "Omarchy"

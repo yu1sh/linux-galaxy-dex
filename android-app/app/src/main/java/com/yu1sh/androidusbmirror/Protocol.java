@@ -54,7 +54,21 @@ final class Protocol {
         if (payload == null) {
             payload = new byte[0];
         }
-        if (payload.length > MAX_PAYLOAD) {
+        writeFrame(output, type, flags, payload, 0, payload.length);
+    }
+
+    static void writeFrame(OutputStream output, int type, int flags,
+                           byte[] payload, int offset, int length) throws IOException {
+        if (payload == null) {
+            if (offset != 0 || length != 0) {
+                throw new IOException("null GUSB payload with non-empty range");
+            }
+            payload = new byte[0];
+        }
+        if (offset < 0 || length < 0 || offset > payload.length - length) {
+            throw new IOException("invalid GUSB payload range");
+        }
+        if (length > MAX_PAYLOAD) {
             throw new IOException("GUSB payload exceeds " + MAX_PAYLOAD + " bytes");
         }
         byte[] header = new byte[HEADER_LENGTH];
@@ -63,13 +77,12 @@ final class Protocol {
         header[5] = (byte) (type & 0xff);
         header[6] = (byte) ((flags >>> 8) & 0xff);
         header[7] = (byte) (flags & 0xff);
-        int length = payload.length;
         header[8] = (byte) ((length >>> 24) & 0xff);
         header[9] = (byte) ((length >>> 16) & 0xff);
         header[10] = (byte) ((length >>> 8) & 0xff);
         header[11] = (byte) (length & 0xff);
         output.write(header);
-        output.write(payload);
+        output.write(payload, offset, length);
         output.flush();
     }
 

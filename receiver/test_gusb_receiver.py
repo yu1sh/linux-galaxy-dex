@@ -18,6 +18,8 @@ try:
         LIBUSB_ERROR_TIMEOUT,
         LibUSB,
         StreamSession,
+        LatestFrameQueue,
+        AccessUnit,
         StreamStopped,
         USBError,
         USBIdentity,
@@ -36,6 +38,9 @@ try:
         TYPE_INFO,
         TYPE_STOP,
         TYPE_VIDEO,
+        FLAG_CODEC_CONFIG,
+        FLAG_END_OF_ACCESS_UNIT,
+        FLAG_KEY_FRAME,
         Frame,
         FrameError,
         FrameParser,
@@ -53,6 +58,8 @@ except ImportError:  # ``python -m unittest discover -s receiver -t .``.
         LIBUSB_ERROR_TIMEOUT,
         LibUSB,
         StreamSession,
+        LatestFrameQueue,
+        AccessUnit,
         StreamStopped,
         USBError,
         USBIdentity,
@@ -71,6 +78,9 @@ except ImportError:  # ``python -m unittest discover -s receiver -t .``.
         TYPE_INFO,
         TYPE_STOP,
         TYPE_VIDEO,
+        FLAG_CODEC_CONFIG,
+        FLAG_END_OF_ACCESS_UNIT,
+        FLAG_KEY_FRAME,
         Frame,
         FrameError,
         FrameParser,
@@ -229,6 +239,58 @@ class StreamSessionTests(unittest.TestCase):
         session.handle(Frame(TYPE_INFO, 0, b'{"width":640,"height":480,"fps":30,"codec":"h264"}'))
         session.handle(Frame(TYPE_INFO, 0, b'{"width":480,"height":640,"fps":30,"codec":"h264"}'))
         self.assertEqual((session.info.width, session.info.height), (480, 640))
+
+    def test_codec_configs_are_concatenated_for_idr_recovery(self) -> None:
+        fake_usb = _FakeUSB([])
+        session = StreamSession(fake_usb, self._connection(), raw_stdout=True, ffplay_path=None)
+        info = Frame(TYPE_INFO, 0, b'{"width":640,"height":480,"fps":30,"codec":"h264"}')
+        session.handle(info)
+        sps, pps, idr = b"SPS", b"PPS", b"IDR"
+        session.handle(Frame(TYPE_VIDEO, FLAG_CODEC_CONFIG | FLAG_END_OF_ACCESS_UNIT, sps))
+        session.handle(Frame(TYPE_VIDEO, FLAG_CODEC_CONFIG | FLAG_END_OF_ACCESS_UNIT, pps))
+        session.handle(Frame(TYPE_VIDEO, FLAG_KEY_FRAME | FLAG_END_OF_ACCESS_UNIT, idr))
+        unit = session._video_queue.get_latest()
+        self.assertIsNotNone(unit)
+        self.assertEqual(unit.payload, sps + pps + idr)
+
+    def test_rotation_drops_old_codec_config(self) -> None:
+        fake_usb = _FakeUSB([])
+        session = StreamSession(fake_usb, self._connection(), raw_stdout=True, ffplay_path=None)
+        session.handle(Frame(TYPE_INFO, 0, b'{"width":640,"height":480,"fps":30,"codec":"h264"}'))
+        session.handle(Frame(TYPE_VIDEO, FLAG_CODEC_CONFIG | FLAG_END_OF_ACCESS_UNIT, b"OLD"))
+        session.handle(Frame(TYPE_INFO, 0, b'{"width":480,"height":640,"fps":30,"codec":"h264"}'))
+        session.handle(Frame(TYPE_VIDEO, FLAG_KEY_FRAME | FLAG_END_OF_ACCESS_UNIT, b"NEW"))
+        self.assertEqual(session._video_queue.get_latest().payload, b"NEW")
+
+    def test_latest_queue_drops_old_units(self) -> None:
+        q = LatestFrameQueue(max_items=2, max_bytes=100)
+        for value in (b"a", b"b", b"c"):
+            q.put(AccessUnit(value, 0, receiver_module.time.monotonic()))
+        self.assertEqual(q.get_latest().payload, b"c")
+
+    def test_run_burst_outputs_keyframe_before_predictive_frame(self) -> None:
+        info = encode_frame(TYPE_INFO, b'{"width":640,"height":480,"fps":30,"codec":"h264"}')
+        wire = info
+        wire += encode_frame(TYPE_VIDEO, b"SPS", FLAG_CODEC_CONFIG | FLAG_END_OF_ACCESS_UNIT)
+        wire += encode_frame(TYPE_VIDEO, b"PPS", FLAG_CODEC_CONFIG | FLAG_END_OF_ACCESS_UNIT)
+        wire += encode_frame(TYPE_VIDEO, b"IDR", FLAG_KEY_FRAME | FLAG_END_OF_ACCESS_UNIT)
+        wire += encode_frame(TYPE_VIDEO, b"P", FLAG_END_OF_ACCESS_UNIT)
+        wire += encode_frame(TYPE_STOP)
+        stdout = _BinaryStdout()
+        session = StreamSession(_FakeUSB([wire]), self._connection(), raw_stdout=True, ffplay_path=None)
+        with mock.patch.object(sys, "stdout", stdout):
+            session.run()
+        output = stdout.buffer.getvalue()
+        self.assertLess(output.index(b"SPS"), output.index(b"P"))
+        self.assertIn(b"SPSPPSIDR", output)
+
+    def test_queue_drop_suppresses_predictive_frames_until_keyframe(self) -> None:
+        q = LatestFrameQueue(max_items=1, max_bytes=100)
+        q.put(AccessUnit(b"IDR", FLAG_KEY_FRAME, receiver_module.time.monotonic()))
+        q.put(AccessUnit(b"P", 0, receiver_module.time.monotonic()))
+        self.assertIsNone(q.get_for_output())
+        q.put(AccessUnit(b"NEXT", FLAG_KEY_FRAME, receiver_module.time.monotonic()))
+        self.assertEqual(q.get_for_output().payload, b"NEXT")
 
     @mock.patch.object(receiver_module.subprocess, "Popen")
     def test_ffplay_gets_info_rate_and_low_latency_options(self, popen: mock.Mock) -> None:

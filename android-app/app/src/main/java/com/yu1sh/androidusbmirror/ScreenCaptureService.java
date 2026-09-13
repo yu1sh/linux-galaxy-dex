@@ -20,11 +20,13 @@ import android.media.MediaFormat;
 import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.ParcelFileDescriptor;
 import android.util.DisplayMetrics;
+import android.util.Log;
 import android.view.Display;
 import android.view.Surface;
 import android.view.WindowManager;
@@ -39,6 +41,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
+import java.util.ArrayDeque;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -67,10 +70,37 @@ public final class ScreenCaptureService extends Service {
     private static final int TARGET_FPS = 60;
     private static final int MAX_CAPTURE_DIMENSION = 1920;
     private static final int VIDEO_BIT_RATE = 8_000_000;
+    private static final String TAG = "AndroidUsbMirror";
+    private static final int MAX_QUEUED_ACCESS_UNITS = 1;
+    private static final long TELEMETRY_INTERVAL_NS = 1_000_000_000L;
 
     private final AtomicBoolean stopRequested = new AtomicBoolean();
+    private final AtomicBoolean syncFrameRequested = new AtomicBoolean();
     private final Object outputLock = new Object();
     private final Object cleanupLock = new Object();
+    private final Object videoQueueLock = new Object();
+    private final ArrayDeque<EncodedAccessUnit> videoQueue = new ArrayDeque<>();
+    private final Object telemetryLock = new Object();
+
+    // The video queue is intentionally bounded to one complete access unit.
+    // A slow AOA host can therefore cause a frame drop, but can never make old
+    // encoded frames accumulate and increase interactive latency indefinitely.
+    private boolean videoWriterActive;
+    private volatile Thread videoWriterThread;
+
+    // These counters are only diagnostic and never cross the GUSB wire. They
+    // are emitted at most once per second under the AndroidUsbMirror tag.
+    private long telemetryWindowStartNs;
+    private long telemetryEncodedAccessUnits;
+    private long telemetryEncodedBytes;
+    private long telemetryPtsSamples;
+    private long telemetryPtsFirstUs = -1L;
+    private long telemetryPtsLastUs = -1L;
+    private long telemetryWrittenAccessUnits;
+    private long telemetryWrittenBytes;
+    private long telemetryWriteNanos;
+    private long telemetryMaxChunkWriteNanos;
+    private long telemetryDroppedAccessUnits;
 
     private volatile Thread sessionThread;
     private volatile Thread controlThread;
@@ -121,6 +151,7 @@ public final class ScreenCaptureService extends Service {
 
         stopRequested.set(false);
         stopFrameSent = false;
+        resetTelemetry();
         startForegroundWithProjectionType(buildNotification("Preparing USB screen sharing"));
         sessionThread = new Thread(
                 () -> runSession(resultCode, resultData), "AndroidUsbMirror-session");
@@ -171,6 +202,7 @@ public final class ScreenCaptureService extends Service {
                 return;
             }
 
+            startVideoWriter();
             initializeProjection(resultCode, resultData);
             CaptureSize size = currentCaptureSize();
             sendInfo(size);
@@ -482,6 +514,14 @@ public final class ScreenCaptureService extends Service {
     }
 
     private void sendInfo(CaptureSize size) throws IOException {
+        // INFO must precede any frames from the new capture configuration.
+        // Discard a queued old frame and wait for an in-flight AU to finish so
+        // a resize cannot reorder stale video after its new dimensions.
+        discardQueuedVideo();
+        awaitVideoWriterIdle();
+        if (stopRequested.get()) {
+            return;
+        }
         JSONObject info = new JSONObject();
         try {
             info.put("width", size.width);
@@ -512,50 +552,332 @@ public final class ScreenCaptureService extends Service {
         ByteBuffer duplicate = csd.duplicate();
         byte[] data = new byte[duplicate.remaining()];
         duplicate.get(data);
-        sendVideoAccessUnit(toAnnexB(data), 0, false, true);
+        // Codec configuration is a stream barrier. Write it after any old
+        // queued AU has drained so a new decoder never sees video first.
+        discardQueuedVideo();
+        awaitVideoWriterIdle();
+        if (!stopRequested.get()) {
+            writeVideoAccessUnit(new EncodedAccessUnit(
+                    toAnnexB(data), 0L, false, true));
+        }
     }
 
     private void sendVideoAccessUnit(byte[] encoded, long presentationTimeUs,
                                      boolean keyFrame, boolean codecConfig) throws IOException {
         byte[] annexB = toAnnexB(encoded);
-        int offset = 0;
-        boolean first = true;
-        while (offset < annexB.length) {
-            int length = Math.min(Protocol.MAX_PAYLOAD, annexB.length - offset);
-            byte[] chunk = new byte[length];
-            System.arraycopy(annexB, offset, chunk, 0, length);
-            int frameFlags = 0;
-            if (first && keyFrame) {
-                frameFlags |= Protocol.FLAG_KEY_FRAME;
+        if (annexB.length == 0) {
+            return;
+        }
+        if (!codecConfig) {
+            recordEncodedAccessUnit(presentationTimeUs, annexB.length);
+        }
+        enqueueVideoAccessUnit(new EncodedAccessUnit(
+                annexB, presentationTimeUs, keyFrame, codecConfig));
+    }
+
+    private void startVideoWriter() {
+        synchronized (videoQueueLock) {
+            Thread existing = videoWriterThread;
+            if (existing != null && existing.isAlive()) {
+                return;
             }
-            if (first && codecConfig) {
-                frameFlags |= Protocol.FLAG_CODEC_CONFIG;
-            }
-            if (offset + length == annexB.length) {
-                frameFlags |= Protocol.FLAG_END_OF_ACCESS_UNIT;
-            }
-            // The current desktop receiver concatenates VIDEO payloads. PTS is
-            // intentionally carried only as a future-compatible local value;
-            // the GUSB/1 header stays compact and transport-neutral.
-            sendVideoChunk(chunk, frameFlags, presentationTimeUs);
-            first = false;
-            offset += length;
+            Thread writer = new Thread(this::runVideoWriter,
+                    "AndroidUsbMirror-video-writer");
+            videoWriterThread = writer;
+            writer.start();
         }
     }
 
-    private void sendVideoChunk(byte[] payload, int flags, long presentationTimeUs)
-            throws IOException {
-        // Keep the method argument explicit so adding a timestamp extension to
-        // GUSB later cannot silently change the payload wire format.
-        if (presentationTimeUs < 0) {
-            presentationTimeUs = 0;
+    private void runVideoWriter() {
+        while (true) {
+            EncodedAccessUnit accessUnit;
+            synchronized (videoQueueLock) {
+                while (videoQueue.isEmpty() && !stopRequested.get()) {
+                    try {
+                        videoQueueLock.wait();
+                    } catch (InterruptedException ignored) {
+                        if (stopRequested.get()) {
+                            return;
+                        }
+                    }
+                }
+                if (stopRequested.get() || videoQueue.isEmpty()) {
+                    return;
+                }
+                accessUnit = videoQueue.removeFirst();
+                videoWriterActive = true;
+            }
+
+            try {
+                writeVideoAccessUnit(accessUnit);
+            } catch (IOException error) {
+                if (!stopRequested.get()) {
+                    Log.w(TAG, "AOA video write failed", error);
+                    requestStop();
+                }
+                return;
+            } finally {
+                synchronized (videoQueueLock) {
+                    videoWriterActive = false;
+                    videoQueueLock.notifyAll();
+                }
+            }
         }
-        synchronized (outputLock) {
-            Protocol.writeFrame(output, Protocol.TYPE_VIDEO, flags, payload);
+    }
+
+    private void enqueueVideoAccessUnit(EncodedAccessUnit accessUnit) {
+        if (stopRequested.get()) {
+            return;
         }
+        EncodedAccessUnit dropped = null;
+        synchronized (videoQueueLock) {
+            if (stopRequested.get()) {
+                return;
+            }
+            if (videoQueue.size() >= MAX_QUEUED_ACCESS_UNITS) {
+                // Preserve an unsent IDR/config AU.  Dropping it in favor of
+                // a predictive frame leaves the desktop decoder unrecoverable
+                // until a later sync request completes.
+                EncodedAccessUnit oldest = videoQueue.peekFirst();
+                if (oldest != null && oldest.keyFrame && !accessUnit.keyFrame) {
+                    dropped = accessUnit;
+                } else {
+                    dropped = videoQueue.removeFirst();
+                }
+            }
+            if (dropped != accessUnit) {
+                videoQueue.addLast(accessUnit);
+            }
+            videoQueueLock.notifyAll();
+        }
+        if (dropped != null) {
+            telemetryDroppedAccessUnit();
+            // If an IDR was discarded before it reached the desktop, clear the
+            // coalescing latch so the next drop can request another sync frame.
+            if (dropped.keyFrame) {
+                syncFrameRequested.set(false);
+            }
+            requestSyncFrame();
+        }
+    }
+
+    private void writeVideoAccessUnit(EncodedAccessUnit accessUnit) throws IOException {
+        long startedNs = System.nanoTime();
+        long maxChunkNs = 0L;
+        boolean completed = false;
+        try {
+            synchronized (outputLock) {
+                OutputStream stream = output;
+                if (stream == null) {
+                    throw new IOException("USB output is closed");
+                }
+                int offset = 0;
+                boolean first = true;
+                while (offset < accessUnit.data.length) {
+                    if (stopRequested.get()) {
+                        throw new IOException("USB video writer stopped");
+                    }
+                    int length = Math.min(Protocol.MAX_PAYLOAD,
+                            accessUnit.data.length - offset);
+                    int frameFlags = 0;
+                    if (first && accessUnit.keyFrame) {
+                        frameFlags |= Protocol.FLAG_KEY_FRAME;
+                    }
+                    if (first && accessUnit.codecConfig) {
+                        frameFlags |= Protocol.FLAG_CODEC_CONFIG;
+                    }
+                    if (offset + length == accessUnit.data.length) {
+                        frameFlags |= Protocol.FLAG_END_OF_ACCESS_UNIT;
+                    }
+                    long chunkStartedNs = System.nanoTime();
+                    Protocol.writeFrame(stream, Protocol.TYPE_VIDEO, frameFlags,
+                            accessUnit.data, offset, length);
+                    maxChunkNs = Math.max(maxChunkNs,
+                            System.nanoTime() - chunkStartedNs);
+                    first = false;
+                    offset += length;
+                }
+                completed = true;
+            }
+        } finally {
+            telemetryVideoWrite(accessUnit, System.nanoTime() - startedNs,
+                    maxChunkNs, completed);
+        }
+        if (completed && accessUnit.keyFrame) {
+            syncFrameRequested.set(false);
+        }
+    }
+
+    private void discardQueuedVideo() {
+        int dropped = 0;
+        boolean droppedKeyFrame = false;
+        synchronized (videoQueueLock) {
+            while (!videoQueue.isEmpty()) {
+                EncodedAccessUnit accessUnit = videoQueue.removeFirst();
+                dropped++;
+                droppedKeyFrame |= accessUnit.keyFrame;
+            }
+            videoQueueLock.notifyAll();
+        }
+        if (dropped != 0) {
+            telemetryDroppedAccessUnits(dropped);
+            if (droppedKeyFrame) {
+                syncFrameRequested.set(false);
+            }
+        }
+    }
+
+    private void awaitVideoWriterIdle() throws IOException {
+        synchronized (videoQueueLock) {
+            while ((!videoQueue.isEmpty() || videoWriterActive)
+                    && !stopRequested.get()) {
+                try {
+                    videoQueueLock.wait(50L);
+                } catch (InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("interrupted while waiting for USB video", error);
+                }
+            }
+        }
+    }
+
+    private void requestSyncFrame() {
+        if (!syncFrameRequested.compareAndSet(false, true)) {
+            return;
+        }
+        MediaCodec activeCodec = codec;
+        if (activeCodec == null) {
+            syncFrameRequested.set(false);
+            return;
+        }
+        Bundle parameters = new Bundle();
+        parameters.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0);
+        try {
+            activeCodec.setParameters(parameters);
+        } catch (RuntimeException error) {
+            syncFrameRequested.set(false);
+            Log.w(TAG, "hardware encoder did not accept sync-frame request", error);
+        }
+    }
+
+    private void resetTelemetry() {
+        synchronized (telemetryLock) {
+            telemetryWindowStartNs = System.nanoTime();
+            telemetryEncodedAccessUnits = 0L;
+            telemetryEncodedBytes = 0L;
+            telemetryPtsSamples = 0L;
+            telemetryPtsFirstUs = -1L;
+            telemetryPtsLastUs = -1L;
+            telemetryWrittenAccessUnits = 0L;
+            telemetryWrittenBytes = 0L;
+            telemetryWriteNanos = 0L;
+            telemetryMaxChunkWriteNanos = 0L;
+            telemetryDroppedAccessUnits = 0L;
+        }
+        syncFrameRequested.set(false);
+    }
+
+    private void recordEncodedAccessUnit(long presentationTimeUs, int bytes) {
+        synchronized (telemetryLock) {
+            telemetryEncodedAccessUnits++;
+            telemetryEncodedBytes += bytes;
+            if (presentationTimeUs >= 0L) {
+                if (telemetryPtsFirstUs < 0L) {
+                    telemetryPtsFirstUs = presentationTimeUs;
+                }
+                if (telemetryPtsLastUs < 0L || presentationTimeUs >= telemetryPtsLastUs) {
+                    telemetryPtsLastUs = presentationTimeUs;
+                    telemetryPtsSamples++;
+                }
+            }
+        }
+        logTelemetryIfDue(false);
+    }
+
+    private void telemetryVideoWrite(EncodedAccessUnit accessUnit, long durationNs,
+                                     long maxChunkNs, boolean completed) {
+        synchronized (telemetryLock) {
+            telemetryWrittenAccessUnits++;
+            telemetryWriteNanos += durationNs;
+            telemetryMaxChunkWriteNanos = Math.max(
+                    telemetryMaxChunkWriteNanos, maxChunkNs);
+            if (completed) {
+                telemetryWrittenBytes += accessUnit.data.length;
+            }
+        }
+        logTelemetryIfDue(false);
+    }
+
+    private void telemetryDroppedAccessUnit() {
+        telemetryDroppedAccessUnits(1);
+    }
+
+    private void telemetryDroppedAccessUnits(int count) {
+        synchronized (telemetryLock) {
+            telemetryDroppedAccessUnits += count;
+        }
+        logTelemetryIfDue(false);
+    }
+
+    private void logTelemetryIfDue(boolean force) {
+        String line = null;
+        synchronized (telemetryLock) {
+            long nowNs = System.nanoTime();
+            if (telemetryWindowStartNs == 0L) {
+                telemetryWindowStartNs = nowNs;
+            }
+            long elapsedNs = nowNs - telemetryWindowStartNs;
+            if (!force && elapsedNs < TELEMETRY_INTERVAL_NS) {
+                return;
+            }
+            if (telemetryEncodedAccessUnits == 0L
+                    && telemetryWrittenAccessUnits == 0L
+                    && telemetryDroppedAccessUnits == 0L) {
+                telemetryWindowStartNs = nowNs;
+                return;
+            }
+            double elapsedSeconds = Math.max(0.001,
+                    elapsedNs / (double) TELEMETRY_INTERVAL_NS);
+            double outputFps = telemetryEncodedAccessUnits / elapsedSeconds;
+            double ptsFps = 0.0;
+            if (telemetryPtsSamples > 1L && telemetryPtsLastUs > telemetryPtsFirstUs) {
+                ptsFps = (telemetryPtsSamples - 1L) * 1_000_000.0
+                        / (telemetryPtsLastUs - telemetryPtsFirstUs);
+            }
+            double averageWriteMs = telemetryWrittenAccessUnits == 0L
+                    ? 0.0 : telemetryWriteNanos / 1_000_000.0
+                    / telemetryWrittenAccessUnits;
+            double maxChunkWriteMs = telemetryMaxChunkWriteNanos / 1_000_000.0;
+            line = "videoStats outputFps=" + outputFps
+                    + " ptsFps=" + ptsFps
+                    + " encodedAUs=" + telemetryEncodedAccessUnits
+                    + " encodedBytes=" + telemetryEncodedBytes
+                    + " writtenAUs=" + telemetryWrittenAccessUnits
+                    + " writtenBytes=" + telemetryWrittenBytes
+                    + " avgAuWriteMs=" + averageWriteMs
+                    + " maxChunkWriteMs=" + maxChunkWriteMs
+                    + " droppedAUs=" + telemetryDroppedAccessUnits;
+            telemetryWindowStartNs = nowNs;
+            telemetryEncodedAccessUnits = 0L;
+            telemetryEncodedBytes = 0L;
+            telemetryPtsSamples = 0L;
+            telemetryPtsFirstUs = -1L;
+            telemetryPtsLastUs = -1L;
+            telemetryWrittenAccessUnits = 0L;
+            telemetryWrittenBytes = 0L;
+            telemetryWriteNanos = 0L;
+            telemetryMaxChunkWriteNanos = 0L;
+            telemetryDroppedAccessUnits = 0L;
+        }
+        Log.i(TAG, line);
     }
 
     private void sendError(String message) {
+        discardQueuedVideo();
+        try {
+            awaitVideoWriterIdle();
+        } catch (IOException ignored) {
+        }
         OutputStream stream = output;
         if (stream == null) {
             return;
@@ -575,6 +897,11 @@ public final class ScreenCaptureService extends Service {
     }
 
     private void sendStopFrame() {
+        discardQueuedVideo();
+        try {
+            awaitVideoWriterIdle();
+        } catch (IOException ignored) {
+        }
         OutputStream stream = output;
         if (stream == null || stopFrameSent) {
             return;
@@ -592,41 +919,68 @@ public final class ScreenCaptureService extends Service {
     }
 
     private void requestStop() {
-        if (stopRequested.compareAndSet(false, true)) {
-            Thread control = controlThread;
-            if (control != null) {
-                control.interrupt();
+        stopRequested.set(true);
+        stopVideoWriter();
+        Thread control = controlThread;
+        if (control != null) {
+            control.interrupt();
+        }
+        ParcelFileDescriptor descriptor = fileDescriptor;
+        if (descriptor != null) {
+            try {
+                descriptor.close();
+            } catch (IOException ignored) {
             }
-            ParcelFileDescriptor descriptor = fileDescriptor;
-            if (descriptor != null) {
-                try {
-                    descriptor.close();
-                } catch (IOException ignored) {
-                }
-            }
+        }
+    }
+
+    private void stopVideoWriter() {
+        synchronized (videoQueueLock) {
+            videoQueue.clear();
+            videoQueueLock.notifyAll();
+        }
+        Thread writer = videoWriterThread;
+        if (writer != null) {
+            writer.interrupt();
         }
     }
 
     private void cleanupSession() {
         synchronized (cleanupLock) {
             stopRequested.set(true);
+            stopVideoWriter();
+            Thread videoWriter = videoWriterThread;
             Thread control = controlThread;
             if (control != null && control != Thread.currentThread()) {
                 control.interrupt();
             }
 
+            ParcelFileDescriptor descriptor = fileDescriptor;
+            fileDescriptor = null;
+            // Close the descriptor before waiting on outputLock. This is what
+            // releases a writer blocked in an AOA transfer when the host stops
+            // reading or the cable is unplugged.
+            closeQuietly(descriptor);
+
             InputStream inputStream = input;
             input = null;
             closeQuietly(inputStream);
+
+            if (videoWriter != null && videoWriter != Thread.currentThread()) {
+                try {
+                    videoWriter.join(1_000);
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            videoWriterThread = null;
+
             OutputStream outputStream;
             synchronized (outputLock) {
                 outputStream = output;
                 output = null;
                 closeQuietly(outputStream);
             }
-            ParcelFileDescriptor descriptor = fileDescriptor;
-            fileDescriptor = null;
-            closeQuietly(descriptor);
 
             if (control != null && control != Thread.currentThread()) {
                 try {
@@ -687,6 +1041,7 @@ public final class ScreenCaptureService extends Service {
             }
             pendingSize = null;
             requestedAccessory = null;
+            logTelemetryIfDue(true);
         }
     }
 
@@ -916,6 +1271,21 @@ public final class ScreenCaptureService extends Service {
                 descriptor.close();
             } catch (IOException ignored) {
             }
+        }
+    }
+
+    private static final class EncodedAccessUnit {
+        final byte[] data;
+        final long presentationTimeUs;
+        final boolean keyFrame;
+        final boolean codecConfig;
+
+        EncodedAccessUnit(byte[] data, long presentationTimeUs,
+                          boolean keyFrame, boolean codecConfig) {
+            this.data = data;
+            this.presentationTimeUs = presentationTimeUs;
+            this.keyFrame = keyFrame;
+            this.codecConfig = codecConfig;
         }
     }
 
