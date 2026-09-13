@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
-Name=Galaxy USB - Desktop
-Comment=Open a landscape virtual display for a Galaxy or Android device over USB
+Name=Desktop (ADB) - Galaxy USB
+Comment=Open a landscape virtual display over USB with scrcpy (ADB required)
 TryExec=galaxy-usb
 Exec=galaxy-usb desktop
 Terminal=false

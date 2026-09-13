@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# USB-only Samsung Galaxy / Android display and control launcher for Linux.
+# USB-only Android display and control launcher for Linux.
 set -u
 
+readonly SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
 readonly WAIT_SECONDS="${GALAXY_WAIT_SECONDS:-15}"
+readonly PROJECTION_WAIT_SECONDS="${GALAXY_PROJECTION_WAIT_SECONDS:-120}"
 readonly DEFAULT_BITRATE="${GALAXY_BITRATE:-16M}"
 readonly DEFAULT_MAX_SIZE="${GALAXY_MAX_SIZE:-1920}"
 readonly DEFAULT_MAX_FPS="${GALAXY_MAX_FPS:-60}"
@@ -23,23 +26,92 @@ fail() {
 
 usage() {
   cat <<'EOF'
-Usage: galaxy-usb [mirror|desktop|list]
+Usage: galaxy-usb [mirror|desktop|projection|list]
 
   mirror   Mirror the Android main display and control it with the PC (default)
   desktop  Create a landscape virtual display for a desktop-like session
+  projection  View a MediaProjection stream over USB without USB debugging
   list     Show ADB devices (the launcher accepts USB devices only)
 EOF
 }
 
-command -v adb >/dev/null 2>&1 || fail "adb が見つかりません。Android platform tools を確認してください。"
-command -v scrcpy >/dev/null 2>&1 || fail "scrcpy が見つかりません。scrcpy を確認してください。"
-
 mode="${1:-mirror}"
 case "$mode" in
-  mirror|desktop|list) ;;
+  mirror|desktop|projection|list) ;;
   -h|--help|help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac
+
+if [[ "$mode" == "projection" ]]; then
+  # The receiver performs the AOA handshake and writes only the raw H.264
+  # payload to stdout in --stdout mode. It deliberately has no ADB dependency.
+  receiver_candidates=()
+  if [[ -n "${GALAXY_PROJECTION_RECEIVER:-}" ]]; then
+    receiver_candidates+=("$GALAXY_PROJECTION_RECEIVER")
+  fi
+  receiver_candidates+=(
+    "$SCRIPT_DIR/receiver/gusb-receiver"
+    "$SCRIPT_DIR/receiver/galaxy-usb-receiver"
+    "$SCRIPT_DIR/receiver/galaxy-usb-aoa"
+    "$HOME/.local/libexec/gusb-receiver"
+    "$HOME/.local/libexec/galaxy-usb-receiver"
+    "$HOME/.local/libexec/galaxy-usb-aoa"
+    "$HOME/.local/bin/gusb-receiver"
+    "$HOME/.local/bin/galaxy-usb-receiver"
+    "$HOME/.local/bin/galaxy-usb-aoa"
+  )
+
+  receiver=""
+  for candidate in "${receiver_candidates[@]}"; do
+    if [[ -x "$candidate" ]]; then
+      receiver="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$receiver" ]]; then
+    if command -v gusb-receiver >/dev/null 2>&1; then
+      receiver="$(command -v gusb-receiver)"
+    elif command -v galaxy-usb-receiver >/dev/null 2>&1; then
+      receiver="$(command -v galaxy-usb-receiver)"
+    elif command -v galaxy-usb-aoa >/dev/null 2>&1; then
+      receiver="$(command -v galaxy-usb-aoa)"
+    fi
+  fi
+  [[ -n "$receiver" ]] || fail "MediaProjection受信プログラムが見つかりません。receiver/README.md のビルドとインストールを確認してください。"
+  command -v ffplay >/dev/null 2>&1 || fail "ffplay が見つかりません。ffmpegを確認してください。"
+
+  notify "Galaxy USB" "MediaProjectionのUSB表示を起動しています。USBデバッグは不要です。"
+  receiver_args=(--stdout --wait "$PROJECTION_WAIT_SECONDS")
+  if [[ -n "${GALAXY_PROJECTION_DEVICE:-}" ]]; then
+    receiver_args+=(--device "$GALAXY_PROJECTION_DEVICE")
+  fi
+  set -o pipefail
+  "$receiver" "${receiver_args[@]}" | ffplay \
+    -loglevel warning \
+    -fflags nobuffer \
+    -flags low_delay \
+    -framedrop \
+    -f h264 \
+    -window_title "Mirror (MediaProjection) - Galaxy USB" \
+    -i -
+  pipeline_status=("${PIPESTATUS[@]}")
+  receiver_status="${pipeline_status[0]}"
+  ffplay_status="${pipeline_status[1]}"
+  if (( receiver_status != 0 )); then
+    printf 'Galaxy USB: MediaProjection受信部が終了しました (status %s)。USB接続、AOA許可、Androidの画面共有同意を確認してください。\n' \
+      "$receiver_status" >&2
+    notify "Galaxy USB" "MediaProjection受信部が終了しました。USB接続とAndroidの許可を確認してください。"
+    exit "$receiver_status"
+  fi
+  if (( ffplay_status != 0 )); then
+    printf 'Galaxy USB: ffplayが終了しました (status %s)。\n' "$ffplay_status" >&2
+    notify "Galaxy USB" "MediaProjectionの表示ウィンドウが終了しました。"
+  fi
+  exit "$ffplay_status"
+fi
+
+command -v adb >/dev/null 2>&1 || fail "adb が見つかりません。Android platform tools を確認してください。"
+command -v scrcpy >/dev/null 2>&1 || fail "scrcpy が見つかりません。scrcpy を確認してください。"
 
 adb start-server >/dev/null 2>&1 || fail "ADBを起動できません。USB権限とudev設定を確認してください。"
 
@@ -105,7 +177,7 @@ common_args=(
 
 if [[ "$mode" == "mirror" ]]; then
   notify "Galaxy USB" "$model のリアルタイム表示を起動しています。"
-  exec scrcpy "${common_args[@]}" "--max-size=$DEFAULT_MAX_SIZE" '--window-title=Galaxy USB - Mirror'
+  exec scrcpy "${common_args[@]}" "--max-size=$DEFAULT_MAX_SIZE" '--window-title=Mirror (ADB) - Galaxy USB'
 fi
 
 # A compatible Android System UI or launcher may provide desktop-like
@@ -118,7 +190,7 @@ desktop_args=(
   "--flex-display"
   "--no-vd-destroy-content"
   "--display-ime-policy=local"
-  '--window-title=Galaxy USB - Desktop'
+  '--window-title=Desktop (ADB) - Galaxy USB'
 )
 
 if [[ -n "$desktop_app" && "$desktop_app" != "none" ]] && adb -s "$serial" shell pm path "$desktop_app" >/dev/null 2>&1; then

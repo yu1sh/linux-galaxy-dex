@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Android USB Mirror</string>
+    <string name="notification_channel_name">Screen sharing</string>
+    <string name="notification_title">Android USB Mirror</string>
+    <string name="stop">Stop sharing</string>
+    <string name="description">Share this Android display to the Omarchy PC over a physical USB accessory connection.</string>
+    <string name="instructions">On the PC, switch the phone to Android Open Accessory mode first.
+USB debugging and an account are not required. Android will ask for screen-capture consent for each session.</string>
+    <string name="start_sharing">Start sharing</string>
+</resources>

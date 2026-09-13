@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Mirror (MediaProjection) - Galaxy USB
+Comment=View the Android screen over USB with MediaProjection (USB debugging not required)
+TryExec=galaxy-usb
+Exec=galaxy-usb projection
+Terminal=false
+StartupNotify=false
+Categories=AudioVideo;
+Keywords=Android;USB;MediaProjection;Mirror;Screen;AOA;

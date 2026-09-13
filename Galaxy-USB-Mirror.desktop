@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
-Name=Galaxy USB - Mirror
-Comment=Mirror and control a Galaxy or Android device over USB
+Name=Mirror (ADB) - Galaxy USB
+Comment=Mirror and control an Android device over USB with scrcpy (ADB required)
 TryExec=galaxy-usb
 Exec=galaxy-usb mirror
 Terminal=false
