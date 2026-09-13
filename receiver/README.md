@@ -35,8 +35,9 @@ normal USB-mode device is selected only if exactly one device answers
 
 The default path starts `ffplay` after the first INFO frame. Raw H.264 has no
 container timestamps, so the INFO `fps` value is supplied as ffplay's input
-frame rate. A rotation or size change is accepted and the same H.264 pipe is
-kept open for the encoder's new SPS/PPS.
+frame rate. The window title defaults to `Mirror (MediaProjection) - Galaxy
+USB` and can be changed with `--window-title`. A rotation or size change is
+accepted and the same H.264 pipe is kept open for the encoder's new SPS/PPS.
 
 For a pipeline or capture test, use:
 

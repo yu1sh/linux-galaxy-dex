@@ -26,6 +26,7 @@ try:
         parse_stream_info,
     )
     from protocol import (
+        AOA_IDENTIFIER_STRINGS,
         HEADER,
         HELLO_PAYLOAD,
         MAGIC,
@@ -60,6 +61,7 @@ except ImportError:  # ``python -m unittest discover -s receiver -t .``.
         parse_stream_info,
     )
     from .protocol import (
+        AOA_IDENTIFIER_STRINGS,
         HEADER,
         HELLO_PAYLOAD,
         MAGIC,
@@ -149,6 +151,19 @@ class InfoAndSelectionTests(unittest.TestCase):
         self.assertIn(0x2D00, AOA_DATA_PRODUCT_IDS)
         self.assertNotIn(0x2D02, AOA_DATA_PRODUCT_IDS)
         self.assertIn(0x2D02, AOA_AUDIO_ONLY_PRODUCT_IDS)
+
+    def test_aoa_identifier_strings_match_android_contract(self) -> None:
+        self.assertEqual(
+            AOA_IDENTIFIER_STRINGS,
+            (
+                "Omarchy",
+                "Galaxy USB MediaProjection",
+                "USB screen projection",
+                "1",
+                "https://github.com/yu1sh/linux-galaxy-dex",
+                "omarchy-galaxy-usb",
+            ),
+        )
 
 
 class _BinaryStdout:

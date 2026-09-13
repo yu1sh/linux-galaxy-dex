@@ -1051,12 +1051,14 @@ class StreamSession:
         raw_stdout: bool,
         ffplay_path: str | None,
         hello_timeout_seconds: float = HELLO_TIMEOUT_SECONDS,
+        ffplay_window_title: str = "Mirror (MediaProjection) - Galaxy USB",
     ) -> None:
         self.usb = usb
         self.connection = connection
         self.raw_stdout = raw_stdout
         self.ffplay_path = ffplay_path
         self.hello_timeout_seconds = hello_timeout_seconds
+        self.ffplay_window_title = ffplay_window_title
         self.parser = FrameParser()
         self.info: StreamInfo | None = None
         self.sink: FfplaySink | None = None
@@ -1116,7 +1118,7 @@ class StreamSession:
             if not self.raw_stdout and self.sink is None:
                 if not self.ffplay_path:
                     raise ReceiverError("ffplayが見つかりません。--stdoutを使用してください")
-                self.sink = FfplaySink(self.ffplay_path)
+                self.sink = FfplaySink(self.ffplay_path, title=self.ffplay_window_title)
                 self.sink.start(stream_info.fps)
             print(
                 f"INFO {stream_info.width}x{stream_info.height} {stream_info.fps:g}fps h264",
@@ -1254,6 +1256,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="表示に使うffplay実行ファイル（既定: PATHのffplay）",
     )
+    parser.add_argument(
+        "--window-title",
+        default="Mirror (MediaProjection) - Galaxy USB",
+        metavar="TITLE",
+        help="ffplay表示ウィンドウのタイトル（既定: Mirror (MediaProjection) - Galaxy USB）",
+    )
     return parser
 
 
@@ -1286,6 +1294,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raw_stdout=args.stdout,
                 ffplay_path=ffplay_path,
                 hello_timeout_seconds=args.hello_timeout,
+                ffplay_window_title=args.window_title,
             )
             try:
                 print(f"接続: {info.display()}（view-only）", file=sys.stderr)

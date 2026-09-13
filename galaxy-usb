@@ -43,8 +43,8 @@ case "$mode" in
 esac
 
 if [[ "$mode" == "projection" ]]; then
-  # The receiver performs the AOA handshake and writes only the raw H.264
-  # payload to stdout in --stdout mode. It deliberately has no ADB dependency.
+  # The receiver performs the AOA handshake and owns the ffplay process. It
+  # deliberately has no ADB dependency; INFO supplies ffplay's input rate.
   receiver_candidates=()
   if [[ -n "${GALAXY_PROJECTION_RECEIVER:-}" ]]; then
     receiver_candidates+=("$GALAXY_PROJECTION_RECEIVER")
@@ -78,36 +78,25 @@ if [[ "$mode" == "projection" ]]; then
     fi
   fi
   [[ -n "$receiver" ]] || fail "MediaProjection受信プログラムが見つかりません。receiver/README.md のビルドとインストールを確認してください。"
-  command -v ffplay >/dev/null 2>&1 || fail "ffplay が見つかりません。ffmpegを確認してください。"
 
   notify "Galaxy USB" "MediaProjectionのUSB表示を起動しています。USBデバッグは不要です。"
-  receiver_args=(--stdout --wait "$PROJECTION_WAIT_SECONDS")
+  receiver_args=(
+    --wait "$PROJECTION_WAIT_SECONDS"
+    --hello-timeout "$PROJECTION_WAIT_SECONDS"
+    --window-title "Mirror (MediaProjection) - Galaxy USB"
+  )
   if [[ -n "${GALAXY_PROJECTION_DEVICE:-}" ]]; then
     receiver_args+=(--device "$GALAXY_PROJECTION_DEVICE")
   fi
-  set -o pipefail
-  "$receiver" "${receiver_args[@]}" | ffplay \
-    -loglevel warning \
-    -fflags nobuffer \
-    -flags low_delay \
-    -framedrop \
-    -f h264 \
-    -window_title "Mirror (MediaProjection) - Galaxy USB" \
-    -i -
-  pipeline_status=("${PIPESTATUS[@]}")
-  receiver_status="${pipeline_status[0]}"
-  ffplay_status="${pipeline_status[1]}"
+  "$receiver" "${receiver_args[@]}"
+  receiver_status="$?"
   if (( receiver_status != 0 )); then
     printf 'Galaxy USB: MediaProjection受信部が終了しました (status %s)。USB接続、AOA許可、Androidの画面共有同意を確認してください。\n' \
       "$receiver_status" >&2
     notify "Galaxy USB" "MediaProjection受信部が終了しました。USB接続とAndroidの許可を確認してください。"
     exit "$receiver_status"
   fi
-  if (( ffplay_status != 0 )); then
-    printf 'Galaxy USB: ffplayが終了しました (status %s)。\n' "$ffplay_status" >&2
-    notify "Galaxy USB" "MediaProjectionの表示ウィンドウが終了しました。"
-  fi
-  exit "$ffplay_status"
+  exit 0
 fi
 
 command -v adb >/dev/null 2>&1 || fail "adb が見つかりません。Android platform tools を確認してください。"

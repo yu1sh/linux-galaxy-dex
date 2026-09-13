@@ -113,7 +113,7 @@ Galaxy S25以外について端末モデルによる制限をコード上で設�
 
 ## Tested environment
 
-現在、以下のADB経路で実機動作を確認しています。MediaProjection経路は、実機での確認が完了するまで未検証として扱います。
+現在、以下のADB経路とAOA MediaProjection経路の実機動作を確認しています。AOA対応状況やDesktop UIは端末とAndroidバージョンによって異なります。
 
 - Host: Omarchy / Linux
 - Device: Samsung Galaxy S25
@@ -121,7 +121,7 @@ Galaxy S25以外について端末モデルによる制限をコード上で設�
 - Mirror: 動作確認済み
 - Desktop virtual display: 動作確認済み
 - Mouse / keyboard control: 動作確認済み
-- MediaProjection/AOA view-only: 未検証
+- MediaProjection/AOA view-only: USB debugging OFFで動作確認済み（H.264 INFO 886x1920 / 60fps、AOA data PID `0x2d00`）
 
 ほかのLinuxディストリビューションやAndroid端末での報告も歓迎します。
 
@@ -348,7 +348,7 @@ scrcpyのバージョンや設定によってショートカットは異なる�
 | Galaxy S25 | Tested |
 | Other recent Galaxy devices | Expected to work; not fully tested |
 | Other Android devices | ADB Mirror likely; Desktop UI and AOA support are device-dependent |
-| AOA MediaProjection | Not yet tested on hardware; expected on AOA-compatible devices; view-only |
+| AOA MediaProjection | Tested with USB debugging off on one AOA-compatible device; broader device compatibility is not established; view-only |
 
 このツールにはOmarchy固有APIやSamsung S25のモデル番号判定はありません。実行ファイル名・環境変数名・Desktop EntryもGalaxy向けの汎用名称に統一しています。
 
