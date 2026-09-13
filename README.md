@@ -149,8 +149,8 @@ sudo pacman -S --needed android-tools android-udev scrcpy ffmpeg libusb libnotif
 ### 2. Clone
 
 ```sh
-git clone https://github.com/yu1sh/omarchy-s25-usb.git
-cd omarchy-s25-usb
+git clone https://github.com/yu1sh/linux-galaxy-dex.git
+cd linux-galaxy-dex
 ```
 
 ### 3. Install launcher
@@ -177,7 +177,7 @@ install -Dm644 Galaxy-USB-MediaProjection.desktop \
   "$HOME/.local/share/applications/Galaxy-USB-MediaProjection.desktop"
 
 install -Dm644 README.md \
-  "$HOME/.local/share/doc/linux-galaxy-usb/README.md"
+  "$HOME/.local/share/doc/linux-galaxy-dex/README.md"
 
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 ```

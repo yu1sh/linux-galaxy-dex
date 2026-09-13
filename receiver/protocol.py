@@ -32,7 +32,7 @@ AOA_MANUFACTURER = "Omarchy"
 AOA_MODEL = "Galaxy USB MediaProjection"
 AOA_DESCRIPTION = "USB screen projection"
 AOA_VERSION = "1"
-AOA_URI = "https://github.com/yu1sh/omarchy-s25-usb"
+AOA_URI = "https://github.com/yu1sh/linux-galaxy-dex"
 AOA_SERIAL = "omarchy-galaxy-usb"
 AOA_IDENTIFIER_STRINGS = (
     AOA_MANUFACTURER,

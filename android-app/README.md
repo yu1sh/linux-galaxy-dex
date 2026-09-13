@@ -15,7 +15,7 @@ manufacturer: Omarchy
 model: Galaxy USB MediaProjection
 description: USB screen projection
 version: 1
-uri: https://github.com/yu1sh/omarchy-s25-usb
+uri: https://github.com/yu1sh/linux-galaxy-dex
 serial: omarchy-galaxy-usb
 ```
 
