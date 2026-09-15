@@ -1,8 +1,8 @@
 # Linux Galaxy DEX
 
-Linux PCとAndroid端末をUSBで接続して、画面表示を行うランチャーとAndroidアプリです。
+LinuxまたはWindows PCとAndroid端末をUSBで接続して、画面表示を行うランチャーとAndroidアプリです。
 
-既存の `mirror` / `desktop` は [scrcpy](https://github.com/Genymobile/scrcpy) を使うADB経路です。新しい `projection` はAndroidのMediaProjectionとAndroid Open Accessory (AOA)を使うため、USBデバッグを有効にせず画面をPCへ送れます。コードは特定の端末モデルを前提にしません。
+既存の `mirror` / `desktop` は [scrcpy](https://github.com/Genymobile/scrcpy) を使うADB経路です。新しい `projection` はAndroidのMediaProjectionと[Android Open Accessory (AOA)](https://source.android.com/docs/core/interaction/accessories/aoa)を使うため、USBデバッグを有効にせず画面をPCへ送れます。Windowsでは `windows\Galaxy-USB.ps1` とStartメニュー用ショートカットを使用します。コードは特定の端末モデルを前提にしません。
 
 Galaxy S25 + Omarchyで作成・検証していますが、端末がAndroid USB accessory modeを実装していればほかのAndroid端末でも利用できます。端末メーカーがAOAを無効にしている場合は利用できません。
 
@@ -19,7 +19,7 @@ Galaxy S25 + Omarchyで作成・検証していますが、端末がAndroid USB 
 
 ### Mirror
 
-Android端末のメインディスプレイをLinux上に低遅延で表示し、PCのマウスとキーボードから操作します。
+Android端末のメインディスプレイをLinuxまたはWindows上に低遅延で表示し、PCのマウスとキーボードから操作します。
 
 標準設定:
 
@@ -126,6 +126,52 @@ Galaxy S25以外について端末モデルによる制限をコード上で設�
 ほかのLinuxディストリビューションやAndroid端末での報告も歓迎します。
 
 ## Installation
+
+### Windows host (native USB)
+
+Windows用の配布物はリポジトリのPowerShellランチャーとStartメニューショートカットです。各モードは既存のscrcpy/ADBまたはPython AOA受信部を直接起動し、実行時のネットワーク接続は不要です。
+
+64-bit Windows PowerShellで、以下をインストールします。
+
+```powershell
+winget install --exact --id Genymobile.scrcpy
+winget install --exact --id Python.Python.3.13
+winget install --exact --id Gyan.FFmpeg.Shared
+```
+
+scrcpyは4.0以上が必要です。scrcpyのWindows版にはADBが含まれます。個別の展開・PATH設定は[scrcpy公式Windowsガイド](https://github.com/Genymobile/scrcpy/blob/master/doc/windows.md)を参照してください。インストール後にPowerShellを開き直し、`adb`, `scrcpy`, `py`, `ffplay` が実行できることを確認してください。
+
+MediaProjection用に、[libusbの公式リリース](https://github.com/libusb/libusb/releases)から64-bitの `libusb-1.0.dll` を取得し、リポジトリ内の `receiver\libusb-1.0.dll` に配置します。DLLは64-bit Pythonと同じアーキテクチャにしてください。このDLLはGit管理対象外です。
+
+#### USBドライバー
+
+- **Mirror (ADB) / Desktop (ADB):** Galaxyでは[Samsung Android USB Driver for Windows](https://developer.samsung.com/android-usb-driver)をインストールします。他社端末では[AndroidのOEM USB driver一覧](https://developer.android.com/studio/run/oem-usb)から端末メーカーのドライバーを選びます。
+- **Mirror (MediaProjection):** WindowsからAOAのUSB endpointを直接使うため、[libusb Windows backend](https://github.com/libusb/libusb/wiki/Windows)が対応するWinUSBドライバーが必要です。[Zadig](https://zadig.akeo.ie/)で `Options > List All Devices` を有効にし、Android端末のUSB interfaceを選んで **WinUSB** を設定します。PCのUSBコントローラーやcomposite parentは選ばないでください。WindowsがMTP用とAOA用に別デバイスとして表示する場合、初回の受信起動後に `Android Accessory` (VID `18D1`, PID `2D00`) が現れます。そこでアクセスエラーになったときは、そのデバイスにもWinUSBを設定して受信部を再実行します。ドライバーの差し替えは選択したinterfaceのMTP等に影響することがあるため、ADB interfaceは変更せず、必要ならデバイスマネージャーからメーカーのドライバーへ戻してください。
+
+#### インストールと起動
+
+リポジトリをcloneまたは展開し、配置先でPowerShellから一度実行します。
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\windows\Install-Galaxy-USB.ps1
+```
+
+この操作は現在のユーザーのStartメニューにショートカットを作成します。管理者権限は不要です。リポジトリを別の場所へ移した場合はインストーラーを再実行してください。Startメニューの **Galaxy USB** はモード選択メニューを開き、各モードのショートカットから直接起動もできます。
+
+コマンドラインから起動する場合:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\windows\Galaxy-USB.ps1 -Mode mirror
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\windows\Galaxy-USB.ps1 -Mode projection
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\windows\Galaxy-USB.ps1 -Mode desktop
+```
+
+ADB端末一覧は `-Mode list` で確認できます。MediaProjectionのAOA候補は `py -3 .\receiver\gusb_receiver.py --list` で確認します。
+
+#### Android側のUSB設定
+
+- **Mirror (ADB) / Desktop (ADB):** 開発者向けオプションでUSBデバッグを有効にし、USB-Cデータケーブルで接続します。USB通知では「ファイル転送 / Android Auto」を選び、端末に表示される「USBデバッグを許可しますか？」を承認します。ADBの接続はUSBのみを選び、ネットワークADB端末は使用しません。
+- **Mirror (MediaProjection):** USBデバッグは不要です（OFFのまま利用できます）。Androidアプリを開いて **Start sharing** を押し、画面共有とUSB accessoryの許可を承認します。ホストがAOAを開始すると端末はUSB accessoryとして再列挙され、H.264映像を物理USB経由で送信します。USB tethering、Wi-Fi、ネットワーク転送は使いません。Android 10以降とAOA対応端末が必要です。
 
 ### 1. Dependencies
 

@@ -177,6 +177,38 @@ class InfoAndSelectionTests(unittest.TestCase):
         )
 
 
+class ReceiverPlatformTests(unittest.TestCase):
+    def test_windows_libusb_candidates_include_adjacent_dll(self) -> None:
+        with mock.patch.object(
+            receiver_module.ctypes.util, "find_library", return_value=None
+        ):
+            names = receiver_module._libusb_library_names("nt")
+
+        local_dll = receiver_module.os.path.join(
+            receiver_module.os.path.dirname(receiver_module.__file__),
+            "libusb-1.0.dll",
+        )
+        self.assertEqual(names, [local_dll, "libusb-1.0.dll"])
+
+    def test_windows_executable_check_does_not_require_posix_execute_bits(self) -> None:
+        self.assertTrue(
+            receiver_module._executable_available(receiver_module.__file__, "nt")
+        )
+        missing = receiver_module.os.path.join(receiver_module.__file__, "missing.exe")
+        self.assertFalse(receiver_module._executable_available(missing, "nt"))
+
+    def test_pipe_diagnostic_is_optional_without_posix_modules(self) -> None:
+        sink = FfplaySink("ffplay")
+        sink.process = mock.Mock()
+        sink.process.stdin = mock.Mock()
+
+        with (
+            mock.patch.object(receiver_module, "fcntl", None),
+            mock.patch.object(receiver_module, "termios", None),
+        ):
+            self.assertIsNone(sink.pipe_pending_bytes())
+
+
 class _BinaryStdout:
     def __init__(self) -> None:
         self.buffer = io.BytesIO()

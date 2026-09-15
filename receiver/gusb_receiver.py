@@ -2,7 +2,8 @@
 """Receive a view-only Android MediaProjection stream over AOA/GUSB.
 
 The program intentionally uses libusb through ctypes instead of requiring a
-Python USB package.  A stock Linux installation with libusb-1.0 is enough.
+Python USB package. Linux uses the system libusb-1.0 library; Windows uses a
+colocated libusb-1.0.dll and a WinUSB-compatible device driver.
 The Android app enters Open Accessory mode, sends GUSB/1 frames over its bulk
 IN endpoint, and receives control frames on bulk OUT.
 """
@@ -13,7 +14,6 @@ import argparse
 import array
 import ctypes
 import ctypes.util
-import fcntl
 import json
 import math
 import os
@@ -23,11 +23,17 @@ import sys
 import threading
 import time
 import queue
-import termios
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator, Sequence
+
+try:  # Pipe diagnostics are optional and unavailable on Windows.
+    import fcntl
+    import termios
+except ImportError:  # pragma: no cover - exercised by the Windows CI job.
+    fcntl = None
+    termios = None
 
 try:  # Direct execution from receiver/gusb_receiver.py.
     from protocol import (
@@ -417,15 +423,39 @@ class AccessoryConnection:
     claimed: bool = False
 
 
+def _libusb_library_names(platform_name: str | None = None) -> list[str]:
+    """Return platform-specific libusb names, preferring a colocated Windows DLL."""
+    if platform_name is None:
+        platform_name = os.name
+
+    names: list[str] = []
+    if platform_name == "nt":
+        names.append(os.path.join(os.path.dirname(__file__), "libusb-1.0.dll"))
+
+    discovered = ctypes.util.find_library("usb-1.0")
+    if discovered:
+        names.append(discovered)
+
+    if platform_name == "nt":
+        names.append("libusb-1.0.dll")
+    else:
+        names.extend(("libusb-1.0.so.0", "libusb-1.0.so"))
+    return list(dict.fromkeys(names))
+
+
+def _executable_available(path: str, platform_name: str | None = None) -> bool:
+    if platform_name is None:
+        platform_name = os.name
+    if platform_name == "nt":
+        return os.path.isfile(path)
+    return os.access(path, os.X_OK)
+
+
 class LibUSB:
     """Small, typed ctypes wrapper around the libusb functions we need."""
 
     def __init__(self) -> None:
-        library_names = []
-        discovered = ctypes.util.find_library("usb-1.0")
-        if discovered:
-            library_names.append(discovered)
-        library_names.extend(("libusb-1.0.so.0", "libusb-1.0.so"))
+        library_names = _libusb_library_names()
         loaded: ctypes.CDLL | None = None
         last_error: OSError | None = None
         for name in dict.fromkeys(library_names):
@@ -435,8 +465,15 @@ class LibUSB:
             except OSError as error:
                 last_error = error
         if loaded is None:
+            if os.name == "nt":
+                message = (
+                    "Windows用のlibusb-1.0.dllが見つかりません。"
+                    "receiverフォルダーに64-bit DLLを配置してください。"
+                )
+            else:
+                message = "libusb-1.0 が見つかりません。libusbをインストールしてください."
             raise ReceiverError(
-                "libusb-1.0 が見つかりません。libusbをインストールしてください."
+                message
             ) from last_error
         self.lib = loaded
         self._set_signatures()
@@ -586,7 +623,13 @@ class LibUSB:
         handle = USBDeviceHandlePtr()
         code = self.lib.libusb_open(device, ctypes.byref(handle))
         if code != 0:
-            raise USBError("USBデバイスを開く", code, _decode_libusb_error(self.lib, code))
+            detail = _decode_libusb_error(self.lib, code)
+            if os.name == "nt" and code in (
+                LIBUSB_ERROR_ACCESS,
+                LIBUSB_ERROR_NOT_SUPPORTED,
+            ):
+                detail += "; Zadigで対象USB interfaceにWinUSBを設定してください"
+            raise USBError("USBデバイスを開く", code, detail)
         return handle
 
     def close_handle(self, handle: USBDeviceHandlePtr | None) -> None:
@@ -1123,7 +1166,7 @@ class FfplaySink:
     def pipe_pending_bytes(self) -> int | None:
         """Return unread bytes queued for ffplay, when the platform exposes it."""
         process = self.process
-        if process is None or process.stdin is None:
+        if process is None or process.stdin is None or fcntl is None or termios is None:
             return None
         pending = array.array("i", [0])
         try:
@@ -1627,7 +1670,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     ffplay_path: str | None = None
     if not args.list and not args.stdout:
         ffplay_path = shutil.which(args.ffplay) if os.path.basename(args.ffplay) == args.ffplay else args.ffplay
-        if not ffplay_path or not os.access(ffplay_path, os.X_OK):
+        ffplay_available = bool(ffplay_path) and _executable_available(ffplay_path)
+        if not ffplay_available:
             print("gusb-receiver: ffplayが見つかりません。--stdoutを使用してください", file=sys.stderr)
             return 2
 

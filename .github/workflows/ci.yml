@@ -31,6 +31,61 @@ jobs:
       - name: Run receiver tests
         run: python -m unittest discover -s receiver -t .
 
+  windows-smoke-tests:
+    name: Windows receiver and launcher smoke tests
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Run receiver tests
+        run: python -m unittest discover -s receiver -t .
+
+      - name: Test launcher modes and Start menu shortcuts
+        shell: pwsh
+        run: |
+          $launcher = Join-Path $PWD "windows\Galaxy-USB.ps1"
+          $powershell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+          $help = & $powershell -NoProfile -ExecutionPolicy Bypass -File $launcher -Mode help 2>&1
+          if ($LASTEXITCODE -ne 0) { throw "Launcher help exited with $LASTEXITCODE" }
+          $helpText = $help -join "`n"
+          foreach ($feature in @("Mirror (ADB)", "Mirror (MediaProjection)", "Desktop (ADB)")) {
+            if (-not $helpText.Contains($feature)) { throw "Launcher help is missing $feature" }
+          }
+
+          $startMenuRoot = Join-Path $env:RUNNER_TEMP "Galaxy USB Start Menu Test"
+          try {
+            & .\windows\Install-Galaxy-USB.ps1 -StartMenuRoot $startMenuRoot
+            $shortcutDirectory = Join-Path $startMenuRoot "Galaxy USB"
+            $shortcuts = Get-ChildItem -LiteralPath $shortcutDirectory -Filter "*.lnk"
+            if ($shortcuts.Count -ne 4) { throw "Expected four Start menu shortcuts, found $($shortcuts.Count)" }
+
+            $shell = New-Object -ComObject WScript.Shell
+            $expected = @(
+              @{ Name = "Mirror (ADB) - Galaxy USB"; Mode = "mirror" },
+              @{ Name = "Mirror (MediaProjection) - Galaxy USB"; Mode = "projection" },
+              @{ Name = "Desktop (ADB) - Galaxy USB"; Mode = "desktop" }
+            )
+            foreach ($item in $expected) {
+              $path = Join-Path $shortcutDirectory ($item.Name + ".lnk")
+              if (-not (Test-Path -LiteralPath $path)) { throw "Missing shortcut: $($item.Name)" }
+              $shortcut = $shell.CreateShortcut($path)
+              if (-not $shortcut.Arguments.Contains("-Mode $($item.Mode)")) {
+                throw "Shortcut does not launch mode $($item.Mode)"
+              }
+            }
+          }
+          finally {
+            if (Test-Path -LiteralPath $startMenuRoot) {
+              Remove-Item -LiteralPath $startMenuRoot -Recurse -Force
+            }
+          }
+
   android-build:
     name: Android app build
     runs-on: ubuntu-latest

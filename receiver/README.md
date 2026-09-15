@@ -1,9 +1,12 @@
 # GUSB receiver
 
-`gusb-receiver` is the Linux-side, view-only receiver for the Android
+`gusb-receiver` is the desktop-side, view-only receiver for the Android
 MediaProjection app. It uses the Android Open Accessory (AOA) protocol over
 USB and does not use ADB or USB debugging. The receiver depends only on
-Python 3.10+, `libusb-1.0`, and `ffplay` for the default display path.
+Python 3.10+, `libusb-1.0`, and `ffplay` for the default display path. On
+Windows, place a matching-architecture `libusb-1.0.dll` beside this receiver
+and install a WinUSB-compatible device driver; see the main README's Windows
+setup for the driver procedure.
 
 ## CLI
 
@@ -11,6 +14,13 @@ Run it from the repository root:
 
 ```sh
 receiver/gusb-receiver
+```
+
+On Windows, run the Python entry point directly:
+
+```powershell
+py -3 .\receiver\gusb_receiver.py
+py -3 .\receiver\gusb_receiver.py --list
 ```
 
 The command first looks for an already re-enumerated AOA data accessory. If
