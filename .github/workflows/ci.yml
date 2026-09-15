@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  receiver-tests:
+    name: Receiver tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.14"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Check shell syntax
+        run: bash -n galaxy-usb receiver/gusb-receiver
+
+      - name: Run receiver tests
+        run: python -m unittest discover -s receiver -t .
+
+  android-build:
+    name: Android app build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: android-app/**/*.gradle*
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: |-
+            platforms;android-35
+            build-tools;35.0.0
+
+      - name: Build debug APK
+        working-directory: android-app
+        run: ./gradlew --no-daemon :app:assembleDebug

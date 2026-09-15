@@ -167,13 +167,13 @@ install -Dm755 receiver/gusb_receiver.py \
 install -Dm644 receiver/protocol.py \
   "$HOME/.local/libexec/protocol.py"
 
-install -Dm644 Galaxy-USB-Mirror.desktop \
+install -Dm644 desktop/Galaxy-USB-Mirror.desktop \
   "$HOME/.local/share/applications/Galaxy-USB-Mirror.desktop"
 
-install -Dm644 Galaxy-USB-Desktop.desktop \
+install -Dm644 desktop/Galaxy-USB-Desktop.desktop \
   "$HOME/.local/share/applications/Galaxy-USB-Desktop.desktop"
 
-install -Dm644 Galaxy-USB-MediaProjection.desktop \
+install -Dm644 desktop/Galaxy-USB-MediaProjection.desktop \
   "$HOME/.local/share/applications/Galaxy-USB-MediaProjection.desktop"
 
 install -Dm644 README.md \
