@@ -52,7 +52,10 @@ jobs:
           $launcher = Join-Path $PWD "windows\Galaxy-USB.ps1"
           $powershell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
           $help = & $powershell -NoProfile -ExecutionPolicy Bypass -File $launcher -Mode help 2>&1
-          if ($LASTEXITCODE -ne 0) { throw "Launcher help exited with $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host ($help | Out-String)
+            throw "Launcher help exited with $LASTEXITCODE"
+          }
           $helpText = $help -join "`n"
           foreach ($feature in @("Mirror (ADB)", "Mirror (MediaProjection)", "Desktop (ADB)")) {
             if (-not $helpText.Contains($feature)) { throw "Launcher help is missing $feature" }
