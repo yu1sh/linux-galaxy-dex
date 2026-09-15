@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import subprocess
 import sys
+import threading
 import unittest
 from unittest import mock
 
@@ -203,7 +204,9 @@ class StreamSessionTests(unittest.TestCase):
     def test_stdout_contains_video_payload_only(self) -> None:
         info = encode_frame(TYPE_INFO, b'{"width":640,"height":480,"fps":30,"codec":"h264"}')
         video = b"\x00\x00\x00\x01\x65sample-h264"
-        wire = info + encode_frame(TYPE_VIDEO, video) + encode_frame(TYPE_STOP)
+        wire = info + encode_frame(
+            TYPE_VIDEO, video, FLAG_KEY_FRAME | FLAG_END_OF_ACCESS_UNIT
+        ) + encode_frame(TYPE_STOP)
         fake_usb = _FakeUSB([wire])
         stdout = _BinaryStdout()
         session = StreamSession(fake_usb, self._connection(), raw_stdout=True, ffplay_path=None)
@@ -220,6 +223,42 @@ class StreamSessionTests(unittest.TestCase):
         outgoing_types = [frame.type for frame in FrameParser().feed(b"".join(fake_usb.outgoing))]
         self.assertEqual(outgoing_types, [TYPE_HELLO, TYPE_ERROR])
 
+    def test_info_failure_propagates_from_writer_and_sends_error(self) -> None:
+        wire = encode_frame(TYPE_INFO, b"{}") + encode_frame(TYPE_STOP)
+        fake_usb = _FakeUSB([wire])
+        session = StreamSession(fake_usb, self._connection(), raw_stdout=True, ffplay_path=None)
+        with self.assertRaises(FrameError):
+            session.run()
+        outgoing_types = [frame.type for frame in FrameParser().feed(b"".join(fake_usb.outgoing))]
+        self.assertEqual(outgoing_types, [TYPE_HELLO, TYPE_ERROR])
+        self.assertFalse(session._reader_thread.is_alive())
+
+    def test_info_is_applied_on_writer_before_video_output(self) -> None:
+        info = encode_frame(TYPE_INFO, b'{"width":640,"height":480,"fps":30,"codec":"h264"}')
+        video = encode_frame(
+            TYPE_VIDEO, b"IDR", FLAG_KEY_FRAME | FLAG_END_OF_ACCESS_UNIT
+        )
+        fake_usb = _FakeUSB([info + video + encode_frame(TYPE_STOP)])
+        fake_sink = mock.Mock()
+        calls: list[tuple[object, ...]] = []
+        fake_sink.start.side_effect = lambda _fps: calls.append(
+            ("start", threading.current_thread())
+        )
+        fake_sink.write.side_effect = lambda payload: calls.append(
+            ("write", payload, threading.current_thread())
+        )
+        session = StreamSession(
+            fake_usb, self._connection(), raw_stdout=False, ffplay_path="ffplay"
+        )
+
+        with mock.patch.object(receiver_module, "FfplaySink", return_value=fake_sink):
+            session.run()
+
+        self.assertEqual([call[0] for call in calls], ["start", "write"])
+        self.assertIs(calls[0][1], threading.main_thread())
+        self.assertEqual(calls[1][1], b"IDR")
+        self.assertIs(calls[1][2], threading.main_thread())
+
     def test_player_breakage_sends_stop(self) -> None:
         info_payload = b'{"width":640,"height":480,"fps":30,"codec":"h264"}'
         fake_usb = _FakeUSB([])
@@ -229,7 +268,7 @@ class StreamSessionTests(unittest.TestCase):
         with mock.patch.object(receiver_module, "FfplaySink", return_value=fake_sink):
             session.handle(Frame(TYPE_INFO, 0, info_payload))
             with self.assertRaises(StreamStopped):
-                session.handle(Frame(TYPE_VIDEO, 0, b"video"))
+                session._write_video(b"video")
         output_frames = FrameParser().feed(b"".join(fake_usb.outgoing))
         self.assertEqual([frame.type for frame in output_frames], [TYPE_STOP])
 
@@ -249,7 +288,7 @@ class StreamSessionTests(unittest.TestCase):
         session.handle(Frame(TYPE_VIDEO, FLAG_CODEC_CONFIG | FLAG_END_OF_ACCESS_UNIT, sps))
         session.handle(Frame(TYPE_VIDEO, FLAG_CODEC_CONFIG | FLAG_END_OF_ACCESS_UNIT, pps))
         session.handle(Frame(TYPE_VIDEO, FLAG_KEY_FRAME | FLAG_END_OF_ACCESS_UNIT, idr))
-        unit = session._video_queue.get_latest()
+        unit = session._video_queue.get_for_output()
         self.assertIsNotNone(unit)
         self.assertEqual(unit.payload, sps + pps + idr)
 
@@ -260,13 +299,36 @@ class StreamSessionTests(unittest.TestCase):
         session.handle(Frame(TYPE_VIDEO, FLAG_CODEC_CONFIG | FLAG_END_OF_ACCESS_UNIT, b"OLD"))
         session.handle(Frame(TYPE_INFO, 0, b'{"width":480,"height":640,"fps":30,"codec":"h264"}'))
         session.handle(Frame(TYPE_VIDEO, FLAG_KEY_FRAME | FLAG_END_OF_ACCESS_UNIT, b"NEW"))
-        self.assertEqual(session._video_queue.get_latest().payload, b"NEW")
+        self.assertEqual(session._video_queue.get_for_output().payload, b"NEW")
 
-    def test_latest_queue_drops_old_units(self) -> None:
-        q = LatestFrameQueue(max_items=2, max_bytes=100)
-        for value in (b"a", b"b", b"c"):
-            q.put(AccessUnit(value, 0, receiver_module.time.monotonic()))
-        self.assertEqual(q.get_latest().payload, b"c")
+    def test_queue_outputs_complete_access_units_in_fifo_order(self) -> None:
+        q = LatestFrameQueue(max_items=3, max_bytes=100)
+        now = receiver_module.time.monotonic()
+        q.put(AccessUnit(b"SPS", FLAG_CODEC_CONFIG | FLAG_END_OF_ACCESS_UNIT, now))
+        q.put(AccessUnit(b"orphan-P", FLAG_END_OF_ACCESS_UNIT, now))
+        q.put(AccessUnit(b"IDR", FLAG_KEY_FRAME | FLAG_END_OF_ACCESS_UNIT, now))
+        q.put(AccessUnit(b"P1", FLAG_END_OF_ACCESS_UNIT, now))
+        q.put(AccessUnit(b"P2", FLAG_END_OF_ACCESS_UNIT, now))
+
+        self.assertEqual(
+            [q.get_for_output().payload for _ in range(3)],
+            [b"IDR", b"P1", b"P2"],
+        )
+        self.assertIsNone(q.get_for_output())
+
+    def test_queue_byte_overflow_trims_through_the_next_keyframe(self) -> None:
+        q = LatestFrameQueue(max_items=8, max_bytes=7)
+        now = receiver_module.time.monotonic()
+        q.put(AccessUnit(b"IDR1", FLAG_KEY_FRAME | FLAG_END_OF_ACCESS_UNIT, now))
+        q.put(AccessUnit(b"P1", FLAG_END_OF_ACCESS_UNIT, now))
+        q.put(AccessUnit(b"IDR2", FLAG_KEY_FRAME | FLAG_END_OF_ACCESS_UNIT, now))
+        q.put(AccessUnit(b"P2!", FLAG_END_OF_ACCESS_UNIT, now))
+
+        self.assertEqual(q.dropped_units, 2)
+        self.assertEqual(
+            [q.get_for_output().payload for _ in range(2)],
+            [b"IDR2", b"P2!"],
+        )
 
     def test_run_burst_outputs_keyframe_before_predictive_frame(self) -> None:
         info = encode_frame(TYPE_INFO, b'{"width":640,"height":480,"fps":30,"codec":"h264"}')
@@ -284,13 +346,21 @@ class StreamSessionTests(unittest.TestCase):
         self.assertLess(output.index(b"SPS"), output.index(b"P"))
         self.assertIn(b"SPSPPSIDR", output)
 
-    def test_queue_drop_suppresses_predictive_frames_until_keyframe(self) -> None:
-        q = LatestFrameQueue(max_items=1, max_bytes=100)
-        q.put(AccessUnit(b"IDR", FLAG_KEY_FRAME, receiver_module.time.monotonic()))
-        q.put(AccessUnit(b"P", 0, receiver_module.time.monotonic()))
+    def test_queue_overflow_waits_for_keyframe_recovery(self) -> None:
+        q = LatestFrameQueue(max_items=2, max_bytes=100)
+        now = receiver_module.time.monotonic()
+        q.put(AccessUnit(b"IDR", FLAG_KEY_FRAME | FLAG_END_OF_ACCESS_UNIT, now))
+        q.put(AccessUnit(b"P1", FLAG_END_OF_ACCESS_UNIT, now))
+        q.put(AccessUnit(b"P2", FLAG_END_OF_ACCESS_UNIT, now))
         self.assertIsNone(q.get_for_output())
-        q.put(AccessUnit(b"NEXT", FLAG_KEY_FRAME, receiver_module.time.monotonic()))
-        self.assertEqual(q.get_for_output().payload, b"NEXT")
+        self.assertTrue(q.awaiting_keyframe)
+        q.put(AccessUnit(b"orphan-P", FLAG_END_OF_ACCESS_UNIT, now))
+        q.put(AccessUnit(b"IDR2", FLAG_KEY_FRAME | FLAG_END_OF_ACCESS_UNIT, now))
+        q.put(AccessUnit(b"P3", FLAG_END_OF_ACCESS_UNIT, now))
+        self.assertEqual(
+            [q.get_for_output().payload for _ in range(2)],
+            [b"IDR2", b"P3"],
+        )
 
     @mock.patch.object(receiver_module.subprocess, "Popen")
     def test_ffplay_gets_info_rate_and_low_latency_options(self, popen: mock.Mock) -> None:
@@ -301,8 +371,16 @@ class StreamSessionTests(unittest.TestCase):
         sink.start(60.0)
         command = popen.call_args.args[0]
         self.assertEqual(command[command.index("-framerate") + 1], "60")
+        self.assertEqual(
+            command[command.index("-use_wallclock_as_timestamps") + 1], "1"
+        )
         self.assertEqual(command[command.index("-probesize") + 1], "32")
         self.assertEqual(command[command.index("-analyzeduration") + 1], "0")
+        self.assertEqual(command[command.index("-sync") + 1], "ext")
+        self.assertIn("-framedrop", command)
+        self.assertLess(
+            command.index("-use_wallclock_as_timestamps"), command.index("-i")
+        )
         self.assertEqual(popen.call_args.kwargs["stdin"], subprocess.PIPE)
 
 
